@@ -16,6 +16,7 @@ from ..abcs.database_types import (
     TemporalType,
     Boolean,
     UnknownColType,
+    Geography,
 )
 from ..abcs.mixins import (
     AbstractMixin_MD5,
@@ -90,6 +91,9 @@ class Mixin_NormalizeValue(AbstractMixin_NormalizeValue):
         # match on both sides: i.e. have properly ordered keys, same spacing, same quotes, etc.
         return f"to_json_string({value})"
 
+    def normalize_geography(self, value: str, _coltype: Geography) -> str:
+        return f"st_astext({value})"
+
 
 class Mixin_Schema(AbstractMixin_Schema):
     def list_tables(self, table_schema: str, like: Compilable = None) -> Compilable:
@@ -148,6 +152,7 @@ class Dialect(BaseDialect, Mixin_Schema):
         "STRING": Text,
         "BOOL": Boolean,
         "JSON": JSON,
+        "GEOGRAPHY": Geography,
     }
     TYPE_ARRAY_RE = re.compile(r"ARRAY<(.+)>")
     TYPE_STRUCT_RE = re.compile(r"STRUCT<(.+)>")
@@ -196,7 +201,7 @@ class Dialect(BaseDialect, Mixin_Schema):
 
     def to_comparable(self, value: str, coltype: ColType) -> str:
         """Ensure that the expression is comparable in ``IS DISTINCT FROM``."""
-        if isinstance(coltype, (JSON, Array, Struct)):
+        if isinstance(coltype, (JSON, Array, Struct, Geography)):
             return self.normalize_value_by_type(value, coltype)
         else:
             return super().to_comparable(value, coltype)

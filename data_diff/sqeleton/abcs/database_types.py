@@ -157,6 +157,11 @@ class Struct(ColType):
 
 
 @dataclass
+class Geography(ColType):
+    pass
+
+
+@dataclass
 class Integer(NumericType, IKey):
     precision: int = 0
     python_type: type = int
