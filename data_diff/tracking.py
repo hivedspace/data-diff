@@ -74,7 +74,7 @@ def bool_notify_about_extension() -> bool:
     return False
 
 
-g_tracking_enabled = True
+g_tracking_enabled = False
 g_anonymous_id = None
 
 entrypoint_name = "Python API"
@@ -211,10 +211,11 @@ def send_event_json(event_json):
     }
     data = json.dumps(event_json).encode()
     try:
-        req = urllib.request.Request(TRACK_URL, data=data, headers=headers)
-        with urllib.request.urlopen(req, timeout=TIMEOUT) as f:
-            res = f.read()
-            if f.code != 200:
-                raise RuntimeError(res)
+        # req = urllib.request.Request(TRACK_URL, data=data, headers=headers)
+        # with urllib.request.urlopen(req, timeout=TIMEOUT) as f:
+        #     res = f.read()
+        #     if f.code != 200:
+        #         raise RuntimeError(res)
+        pass
     except Exception as e:
         logging.debug(f"Failed to post to Rudderstack: {e}")
