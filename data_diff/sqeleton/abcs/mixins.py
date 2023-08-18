@@ -9,6 +9,7 @@ from .database_types import (
     String_UUID,
     JSON,
     Struct,
+    Geography,
 )
 from .compiler import Compilable
 
@@ -75,6 +76,9 @@ class AbstractMixin_NormalizeValue(AbstractMixin):
         """Creates an SQL expression, that serialized a typed struct into a JSON string."""
         return self.to_string(value)
 
+    def normalize_geography(self, value: str, _coltype: Geography) -> str:
+        raise NotImplementedError
+
     def normalize_value_by_type(self, value: str, coltype: ColType) -> str:
         """Creates an SQL expression, that converts 'value' to a normalized representation.
 
@@ -105,6 +109,8 @@ class AbstractMixin_NormalizeValue(AbstractMixin):
             return self.normalize_array(value, coltype)
         elif isinstance(coltype, Struct):
             return self.normalize_struct(value, coltype)
+        elif isinstance(coltype, Geography):
+            return self.normalize_geography(value, coltype)
         return self.to_string(value)
 
 
