@@ -12,6 +12,7 @@ import rich
 from rich.logging import RichHandler
 import click
 
+from data_diff.in_enginediff_tables import InEngineJoinDiffer
 from data_diff.sqeleton.schema import create_schema
 from data_diff.sqeleton.queries.api import current_timestamp
 

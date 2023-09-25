@@ -90,6 +90,9 @@ def and_(*exprs: Expr):
     return BinBoolOp("AND", exprs)
 
 
+def not_(exp: Expr):
+    return UnaryOp("NOT ", exp)
+
 def sum_(expr: Expr):
     """Call SUM(expr)"""
     return Func("sum", [expr])
