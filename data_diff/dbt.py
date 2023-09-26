@@ -303,7 +303,7 @@ def _local_diff(diff_vars: TDiffVars, json_output: bool = False) -> None:
         table1,
         table2,
         threaded=True,
-        algorithm=Algorithm.JOINDIFF,
+        algorithm=Algorithm.INENGINEDIFF,
         extra_columns=extra_columns,
         where=diff_vars.where_filter,
         skip_null_keys=True,

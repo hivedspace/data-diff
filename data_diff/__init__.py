@@ -1,6 +1,7 @@
 from typing import Sequence, Tuple, Iterator, Optional, Union
 
 from data_diff.sqeleton.abcs import DbTime, DbPath
+from .in_enginediff_tables import InEngineJoinDiffer
 
 from .tracking import disable_tracking
 from .databases import connect
@@ -164,6 +165,17 @@ def diff_tables(
         if isinstance(materialize_to_table, str):
             materialize_to_table = table1.database.parse_table_name(eval_name_template(materialize_to_table))
         differ = JoinDiffer(
+            threaded=threaded,
+            max_threadpool_size=max_threadpool_size,
+            validate_unique_key=validate_unique_key,
+            sample_exclusive_rows=sample_exclusive_rows,
+            materialize_to_table=materialize_to_table,
+            materialize_all_rows=materialize_all_rows,
+            table_write_limit=table_write_limit,
+            skip_null_keys=skip_null_keys,
+        )
+    elif algorithm == Algorithm.INENGINEDIFF:
+        differ = InEngineJoinDiffer(
             threaded=threaded,
             max_threadpool_size=max_threadpool_size,
             validate_unique_key=validate_unique_key,
