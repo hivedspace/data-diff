@@ -128,7 +128,7 @@ class TestDbtParser(unittest.TestCase):
 
         with self.assertRaises(DataDiffDbtRunResultsVersionError) as ex:
             DbtParser.get_run_results_models(mock_self)
-        
+
         mock_open.assert_called_once_with(Path(RUN_RESULTS_PATH))
         mock_artifact_parser.assert_called_once_with({})
         self.assertIn("version to be", ex.exception.args[0])
@@ -145,10 +145,10 @@ class TestDbtParser(unittest.TestCase):
         mock_run_results.metadata.dbt_version = "1.0.0"
         mock_fail_result.unique_id = "fail_unique_id"
         mock_run_results.results = [mock_fail_result]
-        
+
         with self.assertRaises(DataDiffDbtNoSuccessfulModelsInRunError):
             DbtParser.get_run_results_models(mock_self)
-            
+
         mock_open.assert_any_call(Path(RUN_RESULTS_PATH))
         mock_artifact_parser.assert_called_once_with({})
 
@@ -268,6 +268,28 @@ class TestDbtParser(unittest.TestCase):
         self.assertEqual(mock_self.connection.get("driver"), expected_driver)
         self.assertEqual(mock_self.connection.get("project"), expected_credentials["project"])
         self.assertEqual(mock_self.connection.get("dataset"), expected_credentials["dataset"])
+
+    def test_set_connection_bigquery_oauth_sa_impersonation(self):
+        expected_driver = "bigquery"
+        expected_credentials = {
+            "method": "oauth",
+            "project": "a_project",
+            "dataset": "a_dataset",
+            "impersonate_service_account": "a_service_account@yourproject.iam.gserviceaccount.com",
+        }
+        mock_self = Mock()
+        mock_self.get_connection_creds.return_value = (expected_credentials, expected_driver)
+
+        DbtParser.set_connection(mock_self)
+
+        self.assertIsInstance(mock_self.connection, dict)
+        self.assertEqual(mock_self.connection.get("driver"), expected_driver)
+        self.assertEqual(mock_self.connection.get("project"), expected_credentials["project"])
+        self.assertEqual(mock_self.connection.get("dataset"), expected_credentials["dataset"])
+        self.assertEqual(
+            mock_self.connection.get("impersonate_service_account"),
+            expected_credentials["impersonate_service_account"],
+        )
 
     def test_set_connection_bigquery_svc_account(self):
         expected_driver = "bigquery"
