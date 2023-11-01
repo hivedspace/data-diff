@@ -207,3 +207,8 @@ class UnknownColType(ColType):
     @property
     def supported(self) -> bool:
         return False
+
+
+@attrs.define(frozen=True)
+class Geography(ColType):
+    pass

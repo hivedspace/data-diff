@@ -18,7 +18,7 @@ from data_diff.abcs.database_types import (
     FractionalType,
     TemporalType,
     Boolean,
-    UnknownColType,
+    UnknownColType, Geography,
 )
 from data_diff.databases.base import (
     BaseDialect,
@@ -72,6 +72,7 @@ class Dialect(BaseDialect):
         "STRING": Text,
         "BOOL": Boolean,
         "JSON": JSON,
+        "GEOGRAPHY": Geography,
     }
     TYPE_ARRAY_RE = re.compile(r"ARRAY<(.+)>")
     TYPE_STRUCT_RE = re.compile(r"STRUCT<(.+)>")
@@ -119,7 +120,7 @@ class Dialect(BaseDialect):
 
     def to_comparable(self, value: str, coltype: ColType) -> str:
         """Ensure that the expression is comparable in ``IS DISTINCT FROM``."""
-        if isinstance(coltype, (JSON, Array, Struct)):
+        if isinstance(coltype, (JSON, Array, Struct, Geography)):
             return self.normalize_value_by_type(value, coltype)
         else:
             return super().to_comparable(value, coltype)
@@ -175,6 +176,9 @@ class Dialect(BaseDialect):
         # So we do the best effort and compare it as strings, hoping that the JSON forms
         # match on both sides: i.e. have properly ordered keys, same spacing, same quotes, etc.
         return f"to_json_string({value})"
+
+    def normalize_geography(self, value: str, _coltype: Geography) -> str:
+        return f"st_astext({value})"
 
 
 @attrs.define(frozen=False, init=False, kw_only=True)

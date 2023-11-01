@@ -1,16 +1,14 @@
 import logging
 from functools import partial
 
-from .joindiff_tables import JoinDiffer, bool_to_int
-from .sqeleton import this
-from .sqeleton.queries import sum_, and_
-from .sqeleton.queries.api import not_, or_
-from .sqeleton.queries.ast_classes import Cast, Code
-from .sqeleton.utils import safezip
-from .table_segment import TableSegment
-from .diff_tables import DiffResultWrapper, DiffStats, DiffResult
-from .info_tree import InfoTree, SegmentInfo
-from .thread_utils import ThreadedYielder
+from data_diff.joindiff_tables import JoinDiffer, bool_to_int
+from data_diff.queries.api import (this, sum_, and_, not_, or_)
+from data_diff.queries.ast_classes import Cast, Code
+from data_diff.table_segment import TableSegment
+from data_diff.diff_tables import DiffResultWrapper, DiffStats, DiffResult
+from data_diff.info_tree import InfoTree, SegmentInfo
+from data_diff.thread_utils import ThreadedYielder
+from data_diff.utils import safezip
 
 logger = logging.getLogger("inenginediff_tables")
 

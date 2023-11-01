@@ -73,7 +73,7 @@ from data_diff.abcs.database_types import (
     DbTime,
     DbPath,
     Boolean,
-    JSON,
+    JSON, Geography,
 )
 
 logger = logging.getLogger("database")
@@ -729,7 +729,7 @@ class BaseDialect(abc.ABC):
                 )
             )
 
-        elif issubclass(cls, (JSON, Array, Struct, Text, Native_UUID)):
+        elif issubclass(cls, (JSON, Array, Struct, Text, Native_UUID, Geography)):
             return cls()
 
         raise TypeError(f"Parsing {type_repr} returned an unknown type '{cls}'.")
@@ -819,6 +819,10 @@ class BaseDialect(abc.ABC):
         """Creates an SQL expression, that serialized a typed struct into a JSON string."""
         return self.to_string(value)
 
+    def normalize_geography(self, value: str, _coltype: Geography) -> str:
+        """This is engine specific so needs to be implemented in the derived class."""
+        raise NotImplementedError
+
     def normalize_value_by_type(self, value: str, coltype: ColType) -> str:
         """Creates an SQL expression, that converts 'value' to a normalized representation.
 
@@ -849,6 +853,8 @@ class BaseDialect(abc.ABC):
             return self.normalize_array(value, coltype)
         elif isinstance(coltype, Struct):
             return self.normalize_struct(value, coltype)
+        elif isinstance(coltype, Geography):
+            return self.normalize_geography(value, coltype)
         return self.to_string(value)
 
     def optimizer_hints(self, hints: str) -> str:
