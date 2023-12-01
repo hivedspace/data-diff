@@ -199,9 +199,18 @@ def apply_query(callback: Callable[[str], Any], sql_code: Union[str, ThreadLocal
 class BaseDialect(abc.ABC):
     SUPPORTS_PRIMARY_KEY: ClassVar[bool] = False
     SUPPORTS_INDEXES: ClassVar[bool] = False
+    PREVENT_OVERFLOW_WHEN_CONCAT: ClassVar[bool] = False
     TYPE_CLASSES: ClassVar[Dict[str, Type[ColType]]] = {}
 
     PLACEHOLDER_TABLE = None  # Used for Oracle
+
+    # Some database do not support long string so concatenation might lead to type overflow
+
+    _prevent_overflow_when_concat: bool = False
+
+    def enable_preventing_type_overflow(self) -> None:
+        logger.info("Preventing type overflow when concatenation is enabled")
+        self._prevent_overflow_when_concat = True
 
     def parse_table_name(self, name: str) -> DbPath:
         "Parse the given table name into a DbPath"
@@ -392,10 +401,19 @@ class BaseDialect(abc.ABC):
         return f"sum({md5})"
 
     def render_concat(self, c: Compiler, elem: Concat) -> str:
+        if self._prevent_overflow_when_concat:
+            items = [
+                f"{self.compile(c, Code(self.md5_as_hex(self.to_string(self.compile(c, expr)))))}"
+                for expr in elem.exprs
+            ]
+
         # We coalesce because on some DBs (e.g. MySQL) concat('a', NULL) is NULL
-        items = [
-            f"coalesce({self.compile(c, Code(self.to_string(self.compile(c, expr))))}, '<null>')" for expr in elem.exprs
-        ]
+        else:
+            items = [
+                f"coalesce({self.compile(c, Code(self.to_string(self.compile(c, expr))))}, '<null>')"
+                for expr in elem.exprs
+            ]
+
         assert items
         if len(items) == 1:
             return items[0]
@@ -493,7 +511,7 @@ class BaseDialect(abc.ABC):
 
         if elem.limit_expr is not None:
             has_order_by = bool(elem.order_by_exprs)
-            select += " " + self.offset_limit(0, elem.limit_expr, has_order_by=has_order_by)
+            select = self.limit_select(select_query=select, offset=0, limit=elem.limit_expr, has_order_by=has_order_by)
 
         if parent_c.in_select:
             select = f"({select}) {c.new_unique_name()}"
@@ -605,14 +623,17 @@ class BaseDialect(abc.ABC):
 
         return f"INSERT INTO {self.compile(c, elem.path)}{columns} {expr}"
 
-    def offset_limit(
-        self, offset: Optional[int] = None, limit: Optional[int] = None, has_order_by: Optional[bool] = None
+    def limit_select(
+        self,
+        select_query: str,
+        offset: Optional[int] = None,
+        limit: Optional[int] = None,
+        has_order_by: Optional[bool] = None,
     ) -> str:
-        "Provide SQL fragment for limit and offset inside a select"
         if offset:
             raise NotImplementedError("No support for OFFSET in query")
 
-        return f"LIMIT {limit}"
+        return f"SELECT * FROM ({select_query}) AS LIMITED_SELECT LIMIT {limit}"
 
     def concat(self, items: List[str]) -> str:
         "Provide SQL for concatenating a bunch of columns into a string"
@@ -767,6 +788,10 @@ class BaseDialect(abc.ABC):
         "Provide SQL for computing md5 and returning an int"
 
     @abstractmethod
+    def md5_as_hex(self, s: str) -> str:
+        """Method to calculate MD5"""
+
+    @abstractmethod
     def normalize_timestamp(self, value: str, coltype: TemporalType) -> str:
         """Creates an SQL expression, that converts 'value' to a normalized timestamp.
 
@@ -775,6 +800,12 @@ class BaseDialect(abc.ABC):
         Date format: ``YYYY-MM-DD HH:mm:SS.FFFFFF``
 
         Precision of dates should be rounded up/down according to coltype.rounds
+        e.g. precision 3 and coltype.rounds:
+            - 1969-12-31 23:59:59.999999 -> 1970-01-01 00:00:00.000000
+            - 1970-01-01 00:00:00.000888 -> 1970-01-01 00:00:00.001000
+            - 1970-01-01 00:00:00.123123 -> 1970-01-01 00:00:00.123000
+
+        Make sure NULLs remain NULLs
         """
 
     @abstractmethod
@@ -888,6 +919,8 @@ class Database(abc.ABC):
     Instanciated using :meth:`~data_diff.connect`
     """
 
+    DIALECT_CLASS: ClassVar[Type[BaseDialect]] = BaseDialect
+
     SUPPORTS_ALPHANUMS: ClassVar[bool] = True
     SUPPORTS_UNIQUE_CONSTAINT: ClassVar[bool] = False
     CONNECT_URI_KWPARAMS: ClassVar[List[str]] = []
@@ -895,6 +928,7 @@ class Database(abc.ABC):
     default_schema: Optional[str] = None
     _interactive: bool = False
     is_closed: bool = False
+    _dialect: BaseDialect = None
 
     @property
     def name(self):
@@ -1109,7 +1143,7 @@ class Database(abc.ABC):
                 return result
         except Exception as _e:
             # logger.exception(e)
-            # logger.error(f'Caused by SQL: {sql_code}')
+            # logger.error(f"Caused by SQL: {sql_code}")
             raise
 
     def _query_conn(self, conn, sql_code: Union[str, ThreadLocalInterpreter]) -> QueryResult:
@@ -1123,9 +1157,12 @@ class Database(abc.ABC):
         return super().close()
 
     @property
-    @abstractmethod
     def dialect(self) -> BaseDialect:
         "The dialect of the database. Used internally by Database, and also available publicly."
+
+        if not self._dialect:
+            self._dialect = self.DIALECT_CLASS()
+        return self._dialect
 
     @property
     @abstractmethod

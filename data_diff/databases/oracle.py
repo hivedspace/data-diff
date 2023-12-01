@@ -1,4 +1,4 @@
-from typing import Any, Dict, List, Optional
+from typing import Any, ClassVar, Dict, List, Optional, Type
 
 import attrs
 
@@ -43,7 +43,7 @@ class Dialect(
     BaseDialect,
 ):
     name = "Oracle"
-    SUPPORTS_PRIMARY_KEY = True
+    SUPPORTS_PRIMARY_KEY: ClassVar[bool] = True
     SUPPORTS_INDEXES = True
     TYPE_CLASSES: Dict[str, type] = {
         "NUMBER": Decimal,
@@ -64,13 +64,17 @@ class Dialect(
     def to_string(self, s: str):
         return f"cast({s} as varchar(1024))"
 
-    def offset_limit(
-        self, offset: Optional[int] = None, limit: Optional[int] = None, has_order_by: Optional[bool] = None
+    def limit_select(
+        self,
+        select_query: str,
+        offset: Optional[int] = None,
+        limit: Optional[int] = None,
+        has_order_by: Optional[bool] = None,
     ) -> str:
         if offset:
             raise NotImplementedError("No support for OFFSET in query")
 
-        return f"FETCH NEXT {limit} ROWS ONLY"
+        return f"SELECT * FROM ({select_query}) FETCH NEXT {limit} ROWS ONLY"
 
     def concat(self, items: List[str]) -> str:
         joined_exprs = " || ".join(items)
@@ -133,6 +137,9 @@ class Dialect(
         # TODO: Find a way to use UTL_RAW.CAST_TO_BINARY_INTEGER ?
         return f"to_number(substr(standard_hash({s}, 'MD5'), {1+MD5_HEXDIGITS-CHECKSUM_HEXDIGITS}), 'xxxxxxxxxxxxxxx') - {CHECKSUM_OFFSET}"
 
+    def md5_as_hex(self, s: str) -> str:
+        return f"standard_hash({s}, 'MD5')"
+
     def normalize_uuid(self, value: str, coltype: ColType_UUID) -> str:
         # Cast is necessary for correct MD5 (trimming not enough)
         return f"CAST(TRIM({value}) AS VARCHAR(36))"
@@ -157,7 +164,7 @@ class Dialect(
 
 @attrs.define(frozen=False, init=False, kw_only=True)
 class Oracle(ThreadedDatabase):
-    dialect = Dialect()
+    DIALECT_CLASS: ClassVar[Type[BaseDialect]] = Dialect
     CONNECT_URI_HELP = "oracle://<user>:<password>@<host>/<database>"
     CONNECT_URI_PARAMS = ["database?"]
 

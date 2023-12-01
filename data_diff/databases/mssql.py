@@ -1,4 +1,4 @@
-from typing import Any, Dict, Optional
+from typing import Any, ClassVar, Dict, Optional, Type
 
 import attrs
 
@@ -38,7 +38,7 @@ def import_mssql():
 class Dialect(BaseDialect):
     name = "MsSQL"
     ROUNDS_ON_PREC_LOSS = True
-    SUPPORTS_PRIMARY_KEY = True
+    SUPPORTS_PRIMARY_KEY: ClassVar[bool] = True
     SUPPORTS_INDEXES = True
     TYPE_CLASSES = {
         # Timestamps
@@ -98,7 +98,7 @@ class Dialect(BaseDialect):
 
     def type_repr(self, t) -> str:
         try:
-            return {bool: "bit"}[t]
+            return {bool: "bit", str: "text"}[t]
         except KeyError:
             return super().type_repr(t)
 
@@ -110,8 +110,12 @@ class Dialect(BaseDialect):
         # See: https://stackoverflow.com/a/18684859/857383
         return f"(({a}<>{b} OR {a} IS NULL OR {b} IS NULL) AND NOT({a} IS NULL AND {b} IS NULL))"
 
-    def offset_limit(
-        self, offset: Optional[int] = None, limit: Optional[int] = None, has_order_by: Optional[bool] = None
+    def limit_select(
+        self,
+        select_query: str,
+        offset: Optional[int] = None,
+        limit: Optional[int] = None,
+        has_order_by: Optional[bool] = None,
     ) -> str:
         if offset:
             raise NotImplementedError("No support for OFFSET in query")
@@ -121,7 +125,7 @@ class Dialect(BaseDialect):
             result += "ORDER BY 1"
 
         result += f" OFFSET 0 ROWS FETCH NEXT {limit} ROWS ONLY"
-        return result
+        return f"SELECT * FROM ({select_query}) AS LIMITED_SELECT {result}"
 
     def constant_values(self, rows) -> str:
         values = ", ".join("(%s)" % ", ".join(self._constant_value(v) for v in row) for row in rows)
@@ -147,10 +151,13 @@ class Dialect(BaseDialect):
     def md5_as_int(self, s: str) -> str:
         return f"convert(bigint, convert(varbinary, '0x' + RIGHT(CONVERT(NVARCHAR(32), HashBytes('MD5', {s}), 2), {CHECKSUM_HEXDIGITS}), 1)) - {CHECKSUM_OFFSET}"
 
+    def md5_as_hex(self, s: str) -> str:
+        return f"HashBytes('MD5', {s})"
+
 
 @attrs.define(frozen=False, init=False, kw_only=True)
 class MsSQL(ThreadedDatabase):
-    dialect = Dialect()
+    DIALECT_CLASS: ClassVar[Type[BaseDialect]] = Dialect
     CONNECT_URI_HELP = "mssql://<user>:<password>@<host>/<database>/<schema>"
     CONNECT_URI_PARAMS = ["database", "schema"]
 
