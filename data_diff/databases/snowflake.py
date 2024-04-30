@@ -1,4 +1,5 @@
-from typing import Any, ClassVar, Union, List, Type
+import base64
+from typing import Any, ClassVar, Union, List, Type, Optional
 import logging
 
 import attrs
@@ -14,6 +15,7 @@ from data_diff.abcs.database_types import (
     DbPath,
     Boolean,
     Date,
+    Time,
 )
 from data_diff.databases.base import (
     BaseDialect,
@@ -44,6 +46,7 @@ class Dialect(BaseDialect):
         "TIMESTAMP_LTZ": Timestamp,
         "TIMESTAMP_TZ": TimestampTZ,
         "DATE": Date,
+        "TIME": Time,
         # Numbers
         "NUMBER": Decimal,
         "FLOAT": Float,
@@ -80,6 +83,21 @@ class Dialect(BaseDialect):
         return f"md5({s})"
 
     def normalize_timestamp(self, value: str, coltype: TemporalType) -> str:
+        try:
+            is_date = coltype.is_date
+            is_time = coltype.is_time
+        except:
+            is_date = False
+            is_time = False
+        if isinstance(coltype, Date) or is_date:
+            return f"({value}::varchar)"
+        elif isinstance(coltype, Time) or is_time:
+            microseconds = f"TIMEDIFF(microsecond, cast('00:00:00' as time), {value})"
+            rounded = f"round({microseconds}, -6 + {coltype.precision})"
+            time_value = f"TIMEADD(microsecond, {rounded}, cast('00:00:00' as time))"
+            converted = f"TO_VARCHAR({time_value}, 'HH24:MI:SS.FF6')"
+            return converted
+
         if coltype.rounds:
             timestamp = f"to_timestamp(round(date_part(epoch_nanosecond, convert_timezone('UTC', {value})::timestamp(9))/1000000000, {coltype.precision}))"
         else:
@@ -103,7 +121,7 @@ class Snowflake(Database):
 
     _conn: Any
 
-    def __init__(self, *, schema: str, **kw):
+    def __init__(self, *, schema: str, key: Optional[str] = None, key_content: Optional[str] = None, **kw) -> None:
         super().__init__()
         snowflake, serialization, default_backend = import_snowflake()
         logging.getLogger("snowflake.connector").setLevel(logging.WARNING)
@@ -113,20 +131,29 @@ class Snowflake(Database):
         logging.getLogger("snowflake.connector.network").disabled = True
 
         assert '"' not in schema, "Schema name should not contain quotes!"
+        if key_content and key:
+            raise ConnectError("Only key value or key file path can be specified, not both")
+
+        key_bytes = None
+        if key:
+            with open(key, "rb") as f:
+                key_bytes = f.read()
+        if key_content:
+            key_bytes = base64.b64decode(key_content)
+
         # If a private key is used, read it from the specified path and pass it as "private_key" to the connector.
-        if "key" in kw:
-            with open(kw.get("key"), "rb") as key:
-                if "password" in kw:
-                    raise ConnectError("Cannot use password and key at the same time")
-                if kw.get("private_key_passphrase"):
-                    encoded_passphrase = kw.get("private_key_passphrase").encode()
-                else:
-                    encoded_passphrase = None
-                p_key = serialization.load_pem_private_key(
-                    key.read(),
-                    password=encoded_passphrase,
-                    backend=default_backend(),
-                )
+        if key_bytes:
+            if "password" in kw:
+                raise ConnectError("Cannot use password and key at the same time")
+            if kw.get("private_key_passphrase"):
+                encoded_passphrase = kw.get("private_key_passphrase").encode()
+            else:
+                encoded_passphrase = None
+            p_key = serialization.load_pem_private_key(
+                key_bytes,
+                password=encoded_passphrase,
+                backend=default_backend(),
+            )
 
             kw["private_key"] = p_key.private_bytes(
                 encoding=serialization.Encoding.DER,
@@ -154,7 +181,8 @@ class Snowflake(Database):
             info_schema_path.insert(0, database)
 
         return (
-            "SELECT column_name, data_type, datetime_precision, numeric_precision, numeric_scale "
+            "SELECT column_name, data_type, datetime_precision, numeric_precision, numeric_scale"
+            "   , coalesce(collation_name, 'utf8') "
             f"FROM {'.'.join(info_schema_path)} "
             f"WHERE table_name = '{name}' AND table_schema = '{schema}'"
         )

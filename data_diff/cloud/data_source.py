@@ -46,7 +46,7 @@ class ValueRequiredPrompt(Prompt):
         return value
 
 
-def _validate_temp_schema(temp_schema: str):
+def _validate_temp_schema(temp_schema: str) -> None:
     if len(temp_schema.split(".")) != 2:
         raise ValueError("Temporary schema should have a format <database>.<schema>")
 
@@ -90,18 +90,15 @@ def create_ds_config(
 
 
 @overload
-def _cast_value(value: str, type_: Literal["integer"]) -> int:
-    ...
+def _cast_value(value: str, type_: Literal["integer"]) -> int: ...
 
 
 @overload
-def _cast_value(value: str, type_: Literal["boolean"]) -> bool:
-    ...
+def _cast_value(value: str, type_: Literal["boolean"]) -> bool: ...
 
 
 @overload
-def _cast_value(value: str, type_: Literal["string"]) -> str:
-    ...
+def _cast_value(value: str, type_: Literal["string"]) -> str: ...
 
 
 def _cast_value(value: str, type_: str) -> Union[bool, int, str]:

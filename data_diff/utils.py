@@ -43,7 +43,14 @@ def safezip(*args):
     return zip(*args)
 
 
-def is_uuid(u):
+UUID_PATTERN = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", re.I)
+
+
+def is_uuid(u: str) -> bool:
+    # E.g., hashlib.md5(b'hello') is a 32-letter hex number, but not an UUID.
+    # It would fail UUID-like comparison (< & >) because of casing and dashes.
+    if not UUID_PATTERN.fullmatch(u):
+        return False
     try:
         UUID(u)
     except ValueError:
@@ -65,15 +72,14 @@ V = TypeVar("V")
 
 class CaseAwareMapping(MutableMapping[str, V]):
     @abstractmethod
-    def get_key(self, key: str) -> str:
-        ...
+    def get_key(self, key: str) -> str: ...
 
     def new(self, initial=()) -> Self:
         return type(self)(initial)
 
 
 class CaseInsensitiveDict(CaseAwareMapping):
-    def __init__(self, initial):
+    def __init__(self, initial) -> None:
         super().__init__()
         self._dict = {k.lower(): (k, v) for k, v in dict(initial).items()}
 
@@ -86,13 +92,13 @@ class CaseInsensitiveDict(CaseAwareMapping):
     def __len__(self) -> int:
         return len(self._dict)
 
-    def __setitem__(self, key: str, value):
+    def __setitem__(self, key: str, value) -> None:
         k = key.lower()
         if k in self._dict:
             key = self._dict[k][0]
         self._dict[k] = key, value
 
-    def __delitem__(self, key: str):
+    def __delitem__(self, key: str) -> None:
         del self._dict[key.lower()]
 
     def get_key(self, key: str) -> str:
@@ -128,23 +134,75 @@ class ArithString:
         return [self.new(int=i) for i in checkpoints]
 
 
-# @attrs.define  # not as long as it inherits from UUID
-class ArithUUID(UUID, ArithString):
+def _any_to_uuid(v: Union[str, int, UUID, "ArithUUID"]) -> UUID:
+    if isinstance(v, ArithUUID):
+        return v.uuid
+    elif isinstance(v, UUID):
+        return v
+    elif isinstance(v, str):
+        return UUID(v)
+    elif isinstance(v, int):
+        return UUID(int=v)
+    else:
+        raise ValueError(f"Cannot convert a value to UUID: {v!r}")
+
+
+@attrs.define(frozen=True, eq=False, order=False)
+class ArithUUID(ArithString):
     "A UUID that supports basic arithmetic (add, sub)"
 
-    def __int__(self):
-        return self.int
+    uuid: UUID = attrs.field(converter=_any_to_uuid)
+    lowercase: Optional[bool] = None
+    uppercase: Optional[bool] = None
+
+    def range(self, other: "ArithUUID", count: int) -> List[Self]:
+        assert isinstance(other, ArithUUID)
+        checkpoints = split_space(self.uuid.int, other.uuid.int, count)
+        return [attrs.evolve(self, uuid=i) for i in checkpoints]
+
+    def __int__(self) -> int:
+        return self.uuid.int
 
     def __add__(self, other: int) -> Self:
         if isinstance(other, int):
-            return self.new(int=self.int + other)
+            return attrs.evolve(self, uuid=self.uuid.int + other)
         return NotImplemented
 
-    def __sub__(self, other: Union[UUID, int]):
+    def __sub__(self, other: Union["ArithUUID", int]):
         if isinstance(other, int):
-            return self.new(int=self.int - other)
-        elif isinstance(other, UUID):
-            return self.int - other.int
+            return attrs.evolve(self, uuid=self.uuid.int - other)
+        elif isinstance(other, ArithUUID):
+            return self.uuid.int - other.uuid.int
+        return NotImplemented
+
+    def __eq__(self, other: object) -> bool:
+        if isinstance(other, ArithUUID):
+            return self.uuid == other.uuid
+        return NotImplemented
+
+    def __ne__(self, other: object) -> bool:
+        if isinstance(other, ArithUUID):
+            return self.uuid != other.uuid
+        return NotImplemented
+
+    def __gt__(self, other: object) -> bool:
+        if isinstance(other, ArithUUID):
+            return self.uuid > other.uuid
+        return NotImplemented
+
+    def __lt__(self, other: object) -> bool:
+        if isinstance(other, ArithUUID):
+            return self.uuid < other.uuid
+        return NotImplemented
+
+    def __ge__(self, other: object) -> bool:
+        if isinstance(other, ArithUUID):
+            return self.uuid >= other.uuid
+        return NotImplemented
+
+    def __le__(self, other: object) -> bool:
+        if isinstance(other, ArithUUID):
+            return self.uuid <= other.uuid
         return NotImplemented
 
 
@@ -182,7 +240,7 @@ class ArithAlphanumeric(ArithString):
     _str: str
     _max_len: Optional[int] = None
 
-    def __attrs_post_init__(self):
+    def __attrs_post_init__(self) -> None:
         if self._str is None:
             raise ValueError("Alphanum string cannot be None")
         if self._max_len and len(self._str) > self._max_len:
@@ -196,16 +254,16 @@ class ArithAlphanumeric(ArithString):
     # def int(self):
     #     return alphanumToNumber(self._str, alphanums)
 
-    def __str__(self):
+    def __str__(self) -> str:
         s = self._str
         if self._max_len:
             s = s.rjust(self._max_len, alphanums[0])
         return s
 
-    def __len__(self):
+    def __len__(self) -> int:
         return len(self._str)
 
-    def __repr__(self):
+    def __repr__(self) -> str:
         return f'alphanum"{self._str}"'
 
     def __add__(self, other: "Union[ArithAlphanumeric, int]") -> Self:
@@ -230,17 +288,17 @@ class ArithAlphanumeric(ArithString):
 
         return NotImplemented
 
-    def __ge__(self, other):
+    def __ge__(self, other) -> bool:
         if not isinstance(other, type(self)):
             return NotImplemented
         return self._str >= other._str
 
-    def __lt__(self, other):
+    def __lt__(self, other) -> bool:
         if not isinstance(other, type(self)):
             return NotImplemented
         return self._str < other._str
 
-    def __eq__(self, other):
+    def __eq__(self, other) -> bool:
         if not isinstance(other, type(self)):
             return NotImplemented
         return self._str == other._str
@@ -357,7 +415,6 @@ def get_from_dict_with_raise(dictionary: Dict, key: str, exception: Exception):
 
 
 class Vector(tuple):
-
     """Immutable implementation of a regular vector over any arithmetic value
 
     Implements a product order - https://en.wikipedia.org/wiki/Product_order
@@ -365,32 +422,32 @@ class Vector(tuple):
     Partial implementation: Only the needed functionality is implemented
     """
 
-    def __lt__(self, other: "Vector"):
+    def __lt__(self, other: "Vector") -> bool:
         if isinstance(other, Vector):
             return all(a < b for a, b in safezip(self, other))
         return NotImplemented
 
-    def __le__(self, other: "Vector"):
+    def __le__(self, other: "Vector") -> bool:
         if isinstance(other, Vector):
             return all(a <= b for a, b in safezip(self, other))
         return NotImplemented
 
-    def __gt__(self, other: "Vector"):
+    def __gt__(self, other: "Vector") -> bool:
         if isinstance(other, Vector):
             return all(a > b for a, b in safezip(self, other))
         return NotImplemented
 
-    def __ge__(self, other: "Vector"):
+    def __ge__(self, other: "Vector") -> bool:
         if isinstance(other, Vector):
             return all(a >= b for a, b in safezip(self, other))
         return NotImplemented
 
-    def __eq__(self, other: "Vector"):
+    def __eq__(self, other: "Vector") -> bool:
         if isinstance(other, Vector):
             return all(a == b for a, b in safezip(self, other))
         return NotImplemented
 
-    def __sub__(self, other: "Vector"):
+    def __sub__(self, other: "Vector") -> "Vector":
         if isinstance(other, Vector):
             return Vector((a - b) for a, b in safezip(self, other))
         raise NotImplementedError()
@@ -400,19 +457,59 @@ class Vector(tuple):
 
 
 def dbt_diff_string_template(
-    rows_added: str, rows_removed: str, rows_updated: str, rows_unchanged: str, extra_info_dict: Dict, extra_info_str
+    total_rows_table1: int,
+    total_rows_table2: int,
+    total_rows_diff: int,
+    rows_added: int,
+    rows_removed: int,
+    rows_updated: int,
+    rows_unchanged: int,
+    extra_info_dict: Dict,
+    extra_info_str: str,
+    is_cloud: Optional[bool] = False,
+    deps_impacts: Optional[Dict] = None,
 ) -> str:
-    string_output = f"\n{tabulate([[rows_added, rows_removed]], headers=['Rows Added', 'Rows Removed'])}"
+    # main table
+    main_rows = [
+        ["Total", total_rows_table1, "", f"{total_rows_table2} [{diff_int_dynamic_color_template(total_rows_diff)}]"],
+        ["Added", "", diff_int_dynamic_color_template(rows_added), ""],
+        ["Removed", "", diff_int_dynamic_color_template(-rows_removed), ""],
+        ["Different", "", rows_updated, ""],
+        ["Unchanged", "", rows_unchanged, ""],
+    ]
 
-    string_output += f"\n\nUpdated Rows: {rows_updated}\n"
-    string_output += f"Unchanged Rows: {rows_unchanged}\n\n"
+    main_headers = ["rows", "PROD", "<>", "DEV"]
+    main_table = tabulate(main_rows, headers=main_headers)
 
-    string_output += extra_info_str
+    # diffs table
+    diffs_rows = sorted(list(extra_info_dict.items()))
 
-    for k, v in extra_info_dict.items():
-        string_output += f"\n{k}: {v}"
+    diffs_headers = ["columns", "% diff values" if is_cloud else "# diff values"]
+    diffs_table = tabulate(diffs_rows, headers=diffs_headers)
+
+    # deps impacts table
+    deps_impacts_table = ""
+    if deps_impacts:
+        deps_impacts_rows = list(deps_impacts.items())
+        deps_impacts_headers = ["deps", "# data assets"]
+        deps_impacts_table = f"\n\n{tabulate(deps_impacts_rows, headers=deps_impacts_headers)}"
+
+    # combine all tables
+    string_output = f"\n{main_table}\n\n{diffs_table}{deps_impacts_table}"
 
     return string_output
+
+
+def diff_int_dynamic_color_template(diff_value: int) -> str:
+    if not isinstance(diff_value, int):
+        return diff_value
+
+    if diff_value > 0:
+        return f"[green]+{diff_value}[/]"
+    elif diff_value < 0:
+        return f"[red]{diff_value}[/]"
+    else:
+        return "0"
 
 
 def _jsons_equiv(a: str, b: str):
@@ -439,18 +536,18 @@ def diffs_are_equiv_jsons(diff: list, json_cols: dict):
     return match, overriden_diff_cols
 
 
-def columns_removed_template(columns_removed) -> str:
-    columns_removed_str = f"Column(s) removed: {columns_removed}\n"
+def columns_removed_template(columns_removed: set) -> str:
+    columns_removed_str = f"[red]Columns removed [-{len(columns_removed)}]:[/] [blue]{columns_removed}[/]\n"
     return columns_removed_str
 
 
-def columns_added_template(columns_added) -> str:
-    columns_added_str = f"Column(s) added: {columns_added}\n"
+def columns_added_template(columns_added: set) -> str:
+    columns_added_str = f"[green]Columns added [+{len(columns_added)}]: {columns_added}[/]\n"
     return columns_added_str
 
 
 def columns_type_changed_template(columns_type_changed) -> str:
-    columns_type_changed_str = f"Type change: {columns_type_changed}\n"
+    columns_type_changed_str = f"Type changed [{len(columns_type_changed)}]: [green]{columns_type_changed}[/]\n"
     return columns_type_changed_str
 
 
@@ -481,47 +578,47 @@ class LogStatusHandler(logging.Handler):
     This log handler can be used to update a rich.status every time a log is emitted.
     """
 
-    def __init__(self):
+    def __init__(self) -> None:
         super().__init__()
         self.status = Status("")
         self.prefix = ""
-        self.cloud_diff_status = {}
+        self.diff_status = {}
 
     def emit(self, record):
         log_entry = self.format(record)
-        if self.cloud_diff_status:
-            self._update_cloud_status(log_entry)
+        if self.diff_status:
+            self._update_diff_status(log_entry)
         else:
             self.status.update(self.prefix + log_entry)
 
     def set_prefix(self, prefix_string):
         self.prefix = prefix_string
 
-    def cloud_diff_started(self, model_name):
-        self.cloud_diff_status[model_name] = "[yellow]In Progress[/]"
-        self._update_cloud_status()
+    def diff_started(self, model_name):
+        self.diff_status[model_name] = "[yellow]In Progress[/]"
+        self._update_diff_status()
 
-    def cloud_diff_finished(self, model_name):
-        self.cloud_diff_status[model_name] = "[green]Finished   [/]"
-        self._update_cloud_status()
+    def diff_finished(self, model_name):
+        self.diff_status[model_name] = "[green]Finished   [/]"
+        self._update_diff_status()
 
-    def _update_cloud_status(self, log=None):
-        cloud_status_string = "\n"
-        for model_name, status in self.cloud_diff_status.items():
-            cloud_status_string += f"{status} {model_name}\n"
-        self.status.update(f"{cloud_status_string}{log or ''}")
+    def _update_diff_status(self, log=None):
+        status_string = "\n"
+        for model_name, status in self.diff_status.items():
+            status_string += f"{status} {model_name}\n"
+        self.status.update(f"{status_string}{log or ''}")
 
 
 class UnknownMeta(type):
     def __instancecheck__(self, instance):
         return instance is Unknown
 
-    def __repr__(self):
+    def __repr__(self) -> str:
         return "Unknown"
 
 
 class Unknown(metaclass=UnknownMeta):
-    def __nonzero__(self):
+    def __bool__(self) -> bool:
         raise TypeError()
 
     def __new__(class_, *args, **kwargs):

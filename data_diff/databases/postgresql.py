@@ -1,5 +1,5 @@
 from typing import Any, ClassVar, Dict, List, Type
-
+from urllib.parse import unquote
 import attrs
 
 from data_diff.abcs.database_types import (
@@ -17,6 +17,7 @@ from data_diff.abcs.database_types import (
     FractionalType,
     Boolean,
     Date,
+    Time,
 )
 from data_diff.databases.base import BaseDialect, ThreadedDatabase, import_helper, ConnectError
 from data_diff.databases.base import (
@@ -45,12 +46,20 @@ class PostgresqlDialect(BaseDialect):
     SUPPORTS_PRIMARY_KEY: ClassVar[bool] = True
     SUPPORTS_INDEXES = True
 
+    # https://www.postgresql.org/docs/current/datatype-numeric.html#DATATYPE-NUMERIC-DECIMAL
+    # without any precision or scale creates an “unconstrained numeric” column
+    # in which numeric values of any length can be stored, up to the implementation limits.
+    # https://www.postgresql.org/docs/current/datatype-numeric.html#DATATYPE-NUMERIC-TABLE
+    DEFAULT_NUMERIC_PRECISION = 16383
+
     TYPE_CLASSES: ClassVar[Dict[str, Type[ColType]]] = {
         # Timestamps
         "timestamp with time zone": TimestampTZ,
         "timestamp without time zone": Timestamp,
         "timestamp": Timestamp,
         "date": Date,
+        "time with time zone": Time,
+        "time without time zone": Time,
         # Numbers
         "double precision": Float,
         "real": Float,
@@ -105,6 +114,23 @@ class PostgresqlDialect(BaseDialect):
         def _add_padding(coltype: TemporalType, timestamp6: str):
             return f"RPAD(LEFT({timestamp6}, {TIMESTAMP_PRECISION_POS+coltype.precision}), {TIMESTAMP_PRECISION_POS+6}, '0')"
 
+        try:
+            is_date = coltype.is_date
+            is_time = coltype.is_time
+        except:
+            is_date = False
+            is_time = False
+
+        if isinstance(coltype, Date) or is_date:
+            return f"cast({value} as varchar)"
+
+        if isinstance(coltype, Time) or is_time:
+            seconds = f"EXTRACT( epoch from {value})"
+            rounded = f"ROUND({seconds},  {coltype.precision})"
+            time_value = f"CAST('00:00:00' as time) + make_interval(0, 0, 0, 0, 0, 0, {rounded})"  # 6th arg = seconds
+            converted = f"to_char({time_value}, 'hh24:mi:ss.ff6')"
+            return converted
+
         if coltype.rounds:
             # NULL value expected to return NULL after normalization
             null_case_begin = f"CASE WHEN {value} IS NULL THEN NULL ELSE "
@@ -157,7 +183,7 @@ class PostgreSQL(ThreadedDatabase):
     _args: Dict[str, Any]
     _conn: Any
 
-    def __init__(self, *, thread_count, **kw):
+    def __init__(self, *, thread_count, **kw) -> None:
         super().__init__(thread_count=thread_count)
         self._args = kw
         self.default_schema = "public"
@@ -168,6 +194,7 @@ class PostgreSQL(ThreadedDatabase):
 
         pg = import_postgresql()
         try:
+            self._args["password"] = unquote(self._args["password"])
             self._conn = pg.connect(
                 **self._args, keepalives=1, keepalives_idle=5, keepalives_interval=2, keepalives_count=2
             )
@@ -184,10 +211,21 @@ class PostgreSQL(ThreadedDatabase):
         if database:
             info_schema_path.insert(0, database)
 
-        return (
-            f"SELECT column_name, data_type, datetime_precision, numeric_precision, numeric_scale FROM {'.'.join(info_schema_path)} "
-            f"WHERE table_name = '{table}' AND table_schema = '{schema}'"
-        )
+        return f"""SELECT column_name, data_type, datetime_precision,
+                    -- see comment for DEFAULT_NUMERIC_PRECISION
+                    CASE
+                        WHEN data_type = 'numeric'
+                            THEN coalesce(numeric_precision, 131072 + {self.dialect.DEFAULT_NUMERIC_PRECISION})
+                        ELSE numeric_precision
+                    END AS numeric_precision,
+                    CASE
+                        WHEN data_type = 'numeric'
+                            THEN coalesce(numeric_scale, {self.dialect.DEFAULT_NUMERIC_PRECISION})
+                        ELSE numeric_scale
+                    END AS numeric_scale
+                    FROM {'.'.join(info_schema_path)}
+                    WHERE table_name = '{table}' AND table_schema = '{schema}'
+            """
 
     def select_table_unique_columns(self, path: DbPath) -> str:
         database, schema, table = self._normalize_table_path(path)
@@ -213,3 +251,8 @@ class PostgreSQL(ThreadedDatabase):
         raise ValueError(
             f"{self.name}: Bad table path for {self}: '{'.'.join(path)}'. Expected format: table, schema.table, or database.schema.table"
         )
+
+    def close(self):
+        super().close()
+        if self._conn is not None:
+            self._conn.close()

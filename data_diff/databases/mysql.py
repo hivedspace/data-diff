@@ -1,4 +1,4 @@
-from typing import Any, ClassVar, Dict, Type
+from typing import Any, ClassVar, Dict, Type, Union
 
 import attrs
 
@@ -20,6 +20,7 @@ from data_diff.databases.base import (
     import_helper,
     ConnectError,
     BaseDialect,
+    ThreadLocalInterpreter,
 )
 from data_diff.databases.base import (
     MD5_HEXDIGITS,
@@ -69,10 +70,10 @@ class Dialect(BaseDialect):
         "boolean": Boolean,
     }
 
-    def quote(self, s: str):
+    def quote(self, s: str) -> str:
         return f"`{s}`"
 
-    def to_string(self, s: str):
+    def to_string(self, s: str) -> str:
         return f"cast({s} as char)"
 
     def is_distinct_from(self, a: str, b: str) -> str:
@@ -128,7 +129,7 @@ class MySQL(ThreadedDatabase):
 
     _args: Dict[str, Any]
 
-    def __init__(self, *, thread_count, **kw):
+    def __init__(self, *, thread_count, **kw) -> None:
         super().__init__(thread_count=thread_count)
         self._args = kw
 
@@ -148,3 +149,11 @@ class MySQL(ThreadedDatabase):
             elif e.errno == mysql.errorcode.ER_BAD_DB_ERROR:
                 raise ConnectError("Database does not exist") from e
             raise ConnectError(*e.args) from e
+
+    def _query_in_worker(self, sql_code: Union[str, ThreadLocalInterpreter]):
+        "This method runs in a worker thread"
+        if self._init_error:
+            raise self._init_error
+        if not self.thread_local.conn.is_connected():
+            self.thread_local.conn.ping(reconnect=True, attempts=3, delay=5)
+        return self._query_conn(self.thread_local.conn, sql_code)

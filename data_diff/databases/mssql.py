@@ -24,6 +24,8 @@ from data_diff.abcs.database_types import (
     Native_UUID,
     Text,
     Boolean,
+    Date,
+    Time,
 )
 
 
@@ -46,7 +48,8 @@ class Dialect(BaseDialect):
         "datetime": Timestamp,
         "datetime2": Timestamp,
         "smalldatetime": Timestamp,
-        "date": Timestamp,
+        "date": Date,
+        "time": Time,
         # Numbers
         "float": Float,
         "real": Float,
@@ -76,7 +79,7 @@ class Dialect(BaseDialect):
         "json": JSON,
     }
 
-    def quote(self, s: str):
+    def quote(self, s: str) -> str:
         return f"[{s}]"
 
     def set_timezone_to_utc(self) -> str:
@@ -93,8 +96,9 @@ class Dialect(BaseDialect):
         FROM sys.database_principals
         WHERE name = CURRENT_USER"""
 
-    def to_string(self, s: str):
-        return f"CONVERT(varchar, {s})"
+    def to_string(self, s: str) -> str:
+        # Both convert(varchar(max), …) and convert(text, …) do work.
+        return f"CONVERT(VARCHAR(MAX), {s})"
 
     def type_repr(self, t) -> str:
         try:
@@ -119,13 +123,15 @@ class Dialect(BaseDialect):
     ) -> str:
         if offset:
             raise NotImplementedError("No support for OFFSET in query")
-
         result = ""
         if not has_order_by:
             result += "ORDER BY 1"
 
         result += f" OFFSET 0 ROWS FETCH NEXT {limit} ROWS ONLY"
-        return f"SELECT * FROM ({select_query}) AS LIMITED_SELECT {result}"
+
+        # mssql requires that subquery columns are all aliased, so
+        # don't wrap in an outer select
+        return f"{select_query} {result}"
 
     def constant_values(self, rows) -> str:
         values = ", ".join("(%s)" % ", ".join(self._constant_value(v) for v in row) for row in rows)
@@ -165,7 +171,7 @@ class MsSQL(ThreadedDatabase):
     _args: Dict[str, Any]
     _mssql: Any
 
-    def __init__(self, host, port, user, password, *, database, thread_count, **kw):
+    def __init__(self, host, port, user, password, *, database, thread_count, **kw) -> None:
         super().__init__(thread_count=thread_count)
 
         args = dict(server=host, port=port, database=database, user=user, password=password, **kw)
@@ -199,7 +205,7 @@ class MsSQL(ThreadedDatabase):
             info_schema_path.insert(0, self.dialect.quote(database))
 
         return (
-            "SELECT column_name, data_type, datetime_precision, numeric_precision, numeric_scale "
+            "SELECT column_name, data_type, datetime_precision, numeric_precision, numeric_scale, collation_name "
             f"FROM {'.'.join(info_schema_path)} "
             f"WHERE table_name = '{name}' AND table_schema = '{schema}'"
         )

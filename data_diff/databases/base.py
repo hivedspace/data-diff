@@ -5,7 +5,22 @@ from datetime import datetime
 import math
 import sys
 import logging
-from typing import Any, Callable, ClassVar, Dict, Generator, Tuple, Optional, Sequence, Type, List, Union, TypeVar
+from typing import (
+    Any,
+    Callable,
+    ClassVar,
+    Dict,
+    Generator,
+    Iterator,
+    NewType,
+    Tuple,
+    Optional,
+    Sequence,
+    Type,
+    List,
+    Union,
+    TypeVar,
+)
 from functools import partial, wraps
 from concurrent.futures import ThreadPoolExecutor
 import threading
@@ -19,7 +34,8 @@ from typing_extensions import Self
 
 from data_diff.abcs.compiler import AbstractCompiler, Compilable
 from data_diff.queries.extras import ApplyFuncAndNormalizeAsString, Checksum, NormalizeAsString
-from data_diff.utils import ArithString, is_uuid, join_iter, safezip
+from data_diff.schema import RawColumnInfo
+from data_diff.utils import ArithString, ArithUUID, is_uuid, join_iter, safezip
 from data_diff.queries.api import Expr, table, Select, SKIP, Explain, Code, this
 from data_diff.queries.ast_classes import (
     Alias,
@@ -115,7 +131,7 @@ class Compiler(AbstractCompiler):
     def compile(self, elem, params=None) -> str:
         return self.dialect.compile(self, elem, params)
 
-    def new_unique_name(self, prefix="tmp"):
+    def new_unique_name(self, prefix="tmp") -> str:
         self._counter[0] += 1
         return f"{prefix}{self._counter[0]}"
 
@@ -172,7 +188,7 @@ class ThreadLocalInterpreter:
     compiler: Compiler
     gen: Generator
 
-    def apply_queries(self, callback: Callable[[str], Any]):
+    def apply_queries(self, callback: Callable[[str], Any]) -> None:
         q: Expr = next(self.gen)
         while True:
             sql = self.compiler.database.dialect.compile(self.compiler, q)
@@ -201,6 +217,7 @@ class BaseDialect(abc.ABC):
     SUPPORTS_INDEXES: ClassVar[bool] = False
     PREVENT_OVERFLOW_WHEN_CONCAT: ClassVar[bool] = False
     TYPE_CLASSES: ClassVar[Dict[str, Type[ColType]]] = {}
+    DEFAULT_NUMERIC_PRECISION: ClassVar[int] = 0  # effective precision when type is just "NUMERIC"
 
     PLACEHOLDER_TABLE = None  # Used for Oracle
 
@@ -247,6 +264,9 @@ class BaseDialect(abc.ABC):
             return self.timestamp_value(elem)
         elif isinstance(elem, bytes):
             return f"b'{elem.decode()}'"
+        elif isinstance(elem, ArithUUID):
+            s = f"'{elem.uuid}'"
+            return s.upper() if elem.uppercase else s.lower() if elem.lowercase else s
         elif isinstance(elem, ArithString):
             return f"'{elem}'"
         assert False, elem
@@ -680,8 +700,10 @@ class BaseDialect(abc.ABC):
             return f"'{v}'"
         elif isinstance(v, datetime):
             return self.timestamp_value(v)
-        elif isinstance(v, UUID):
+        elif isinstance(v, UUID):  # probably unused anymore in favour of ArithUUID
             return f"'{v}'"
+        elif isinstance(v, ArithUUID):
+            return f"'{v.uuid}'"
         elif isinstance(v, decimal.Decimal):
             return str(v)
         elif isinstance(v, bytearray):
@@ -707,27 +729,18 @@ class BaseDialect(abc.ABC):
             datetime: "TIMESTAMP",
         }[t]
 
-    def _parse_type_repr(self, type_repr: str) -> Optional[Type[ColType]]:
-        return self.TYPE_CLASSES.get(type_repr)
-
-    def parse_type(
-        self,
-        table_path: DbPath,
-        col_name: str,
-        type_repr: str,
-        datetime_precision: int = None,
-        numeric_precision: int = None,
-        numeric_scale: int = None,
-    ) -> ColType:
+    def parse_type(self, table_path: DbPath, info: RawColumnInfo) -> ColType:
         "Parse type info as returned by the database"
 
-        cls = self._parse_type_repr(type_repr)
+        cls = self.TYPE_CLASSES.get(info.data_type)
         if cls is None:
-            return UnknownColType(type_repr)
+            return UnknownColType(info.data_type)
 
         if issubclass(cls, TemporalType):
             return cls(
-                precision=datetime_precision if datetime_precision is not None else DEFAULT_DATETIME_PRECISION,
+                precision=info.datetime_precision
+                if info.datetime_precision is not None
+                else DEFAULT_DATETIME_PRECISION,
                 rounds=self.ROUNDS_ON_PREC_LOSS,
             )
 
@@ -738,22 +751,22 @@ class BaseDialect(abc.ABC):
             return cls()
 
         elif issubclass(cls, Decimal):
-            if numeric_scale is None:
-                numeric_scale = 0  # Needed for Oracle.
-            return cls(precision=numeric_scale)
+            if info.numeric_scale is None:
+                return cls(precision=0)  # Needed for Oracle.
+            return cls(precision=info.numeric_scale)
 
         elif issubclass(cls, Float):
             # assert numeric_scale is None
             return cls(
                 precision=self._convert_db_precision_to_digits(
-                    numeric_precision if numeric_precision is not None else DEFAULT_NUMERIC_PRECISION
+                    info.numeric_precision if info.numeric_precision is not None else DEFAULT_NUMERIC_PRECISION
                 )
             )
 
         elif issubclass(cls, (JSON, Array, Struct, Text, Native_UUID, Geography)):
             return cls()
 
-        raise TypeError(f"Parsing {type_repr} returned an unknown type '{cls}'.")
+        raise TypeError(f"Parsing {info.data_type} returned an unknown type {cls!r}.")
 
     def _convert_db_precision_to_digits(self, p: int) -> int:
         """Convert from binary precision, used by floats, to decimal precision."""
@@ -893,20 +906,21 @@ class BaseDialect(abc.ABC):
 
 
 T = TypeVar("T", bound=BaseDialect)
+Row = Sequence[Any]
 
 
 @attrs.define(frozen=True)
 class QueryResult:
-    rows: list
+    rows: List[Row]
     columns: Optional[list] = None
 
-    def __iter__(self):
+    def __iter__(self) -> Iterator[Row]:
         return iter(self.rows)
 
-    def __len__(self):
+    def __len__(self) -> int:
         return len(self.rows)
 
-    def __getitem__(self, i):
+    def __getitem__(self, i) -> Row:
         return self.rows[i]
 
 
@@ -930,6 +944,12 @@ class Database(abc.ABC):
     is_closed: bool = False
     _dialect: BaseDialect = None
 
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        self.close()
+
     @property
     def name(self):
         return type(self).__name__
@@ -937,7 +957,7 @@ class Database(abc.ABC):
     def compile(self, sql_ast):
         return self.dialect.compile(Compiler(self), sql_ast)
 
-    def query(self, sql_ast: Union[Expr, Generator], res_type: type = None):
+    def query(self, sql_ast: Union[Expr, Generator], res_type: type = None, log_message: Optional[str] = None):
         """Query the given SQL code/AST, and attempt to convert the result to type 'res_type'
 
         If given a generator, it will execute all the yielded sql queries with the same thread and cursor.
@@ -962,7 +982,10 @@ class Database(abc.ABC):
                 if sql_code is SKIP:
                     return SKIP
 
-            logger.debug("Running SQL (%s):\n%s", self.name, sql_code)
+            if log_message:
+                logger.debug("Running SQL (%s): %s \n%s", self.name, log_message, sql_code)
+            else:
+                logger.debug("Running SQL (%s):\n%s", self.name, sql_code)
 
         if self._interactive and isinstance(sql_ast, Select):
             explained_sql = self.compile(Explain(sql_ast))
@@ -1021,23 +1044,35 @@ class Database(abc.ABC):
             f"WHERE table_name = '{name}' AND table_schema = '{schema}'"
         )
 
-    def query_table_schema(self, path: DbPath) -> Dict[str, tuple]:
+    def query_table_schema(self, path: DbPath) -> Dict[str, RawColumnInfo]:
         """Query the table for its schema for table in 'path', and return {column: tuple}
         where the tuple is (table_name, col_name, type_repr, datetime_precision?, numeric_precision?, numeric_scale?)
 
         Note: This method exists instead of select_table_schema(), just because not all databases support
               accessing the schema using a SQL query.
         """
-        rows = self.query(self.select_table_schema(path), list)
+        rows = self.query(self.select_table_schema(path), list, log_message=path)
+
         if not rows:
             raise RuntimeError(f"{self.name}: Table '{'.'.join(path)}' does not exist, or has no columns")
 
-        d = {r[0]: r for r in rows}
+        d = {
+            r[0]: RawColumnInfo(
+                column_name=r[0],
+                data_type=r[1],
+                datetime_precision=r[2],
+                numeric_precision=r[3],
+                numeric_scale=r[4],
+                collation_name=r[5] if len(r) > 5 else None,
+            )
+            for r in rows
+        }
+
         assert len(d) == len(rows)
         return d
 
     def select_table_unique_columns(self, path: DbPath) -> str:
-        "Provide SQL for selecting the names of unique columns in the table"
+        """Provide SQL for selecting the names of unique columns in the table"""
         schema, name = self._normalize_table_path(path)
 
         return (
@@ -1050,11 +1085,15 @@ class Database(abc.ABC):
         """Query the table for its unique columns for table in 'path', and return {column}"""
         if not self.SUPPORTS_UNIQUE_CONSTAINT:
             raise NotImplementedError("This database doesn't support 'unique' constraints")
-        res = self.query(self.select_table_unique_columns(path), List[str])
+        res = self.query(self.select_table_unique_columns(path), List[str], log_message=path)
         return list(res)
 
     def _process_table_schema(
-        self, path: DbPath, raw_schema: Dict[str, tuple], filter_columns: Sequence[str] = None, where: str = None
+        self,
+        path: DbPath,
+        raw_schema: Dict[str, RawColumnInfo],
+        filter_columns: Sequence[str] = None,
+        where: str = None,
     ):
         """Process the result of query_table_schema().
 
@@ -1070,7 +1109,7 @@ class Database(abc.ABC):
             accept = {i.lower() for i in filter_columns}
             filtered_schema = {name: row for name, row in raw_schema.items() if name.lower() in accept}
 
-        col_dict = {row[0]: self.dialect.parse_type(path, *row) for _name, row in filtered_schema.items()}
+        col_dict = {info.column_name: self.dialect.parse_type(path, info) for info in filtered_schema.values()}
 
         self._refine_coltypes(path, col_dict, where)
 
@@ -1079,7 +1118,7 @@ class Database(abc.ABC):
 
     def _refine_coltypes(
         self, table_path: DbPath, col_dict: Dict[str, ColType], where: Optional[str] = None, sample_size=64
-    ):
+    ) -> Dict[str, ColType]:
         """Refine the types in the column dict, by querying the database for a sample of their values
 
         'where' restricts the rows to be sampled.
@@ -1087,18 +1126,16 @@ class Database(abc.ABC):
 
         text_columns = [k for k, v in col_dict.items() if isinstance(v, Text)]
         if not text_columns:
-            return
+            return col_dict
 
         fields = [Code(self.dialect.normalize_uuid(self.dialect.quote(c), String_UUID())) for c in text_columns]
 
         samples_by_row = self.query(
-            table(*table_path).select(*fields).where(Code(where) if where else SKIP).limit(sample_size), list
+            table(*table_path).select(*fields).where(Code(where) if where else SKIP).limit(sample_size),
+            list,
+            log_message=table_path,
         )
-        if not samples_by_row:
-            raise ValueError(f"Table {table_path} is empty.")
-
-        samples_by_col = list(zip(*samples_by_row))
-
+        samples_by_col = list(zip(*samples_by_row)) if samples_by_row else [[]] * len(text_columns)
         for col_name, samples in safezip(text_columns, samples_by_col):
             uuid_samples = [s for s in samples if s and is_uuid(s)]
 
@@ -1109,7 +1146,10 @@ class Database(abc.ABC):
                     )
                 else:
                     assert col_name in col_dict
-                    col_dict[col_name] = String_UUID()
+                    col_dict[col_name] = String_UUID(
+                        lowercase=all(s == s.lower() for s in uuid_samples),
+                        uppercase=all(s == s.upper() for s in uuid_samples),
+                    )
                     continue
 
             if self.SUPPORTS_ALPHANUMS:  # Anything but MySQL (so far)
@@ -1121,7 +1161,9 @@ class Database(abc.ABC):
                         )
                     else:
                         assert col_name in col_dict
-                        col_dict[col_name] = String_VaryingAlphanum()
+                        col_dict[col_name] = String_VaryingAlphanum(collation=col_dict[col_name].collation)
+
+        return col_dict
 
     def _normalize_table_path(self, path: DbPath) -> DbPath:
         if len(path) == 1:
@@ -1152,9 +1194,8 @@ class Database(abc.ABC):
         return apply_query(callback, sql_code)
 
     def close(self):
-        "Close connection(s) to the database instance. Querying will stop functioning."
+        """Close connection(s) to the database instance. Querying will stop functioning."""
         self.is_closed = True
-        return super().close()
 
     @property
     def dialect(self) -> BaseDialect:
@@ -1197,7 +1238,7 @@ class ThreadedDatabase(Database):
     _queue: Optional[ThreadPoolExecutor] = None
     thread_local: threading.local = attrs.field(factory=threading.local)
 
-    def __attrs_post_init__(self):
+    def __attrs_post_init__(self) -> None:
         self._queue = ThreadPoolExecutor(self.thread_count, initializer=self.set_conn)
         logger.info(f"[{self.name}] Starting a threadpool, size={self.thread_count}.")
 
@@ -1213,18 +1254,20 @@ class ThreadedDatabase(Database):
         return r.result()
 
     def _query_in_worker(self, sql_code: Union[str, ThreadLocalInterpreter]):
-        "This method runs in a worker thread"
+        """This method runs in a worker thread"""
         if self._init_error:
             raise self._init_error
         return self._query_conn(self.thread_local.conn, sql_code)
 
     @abstractmethod
     def create_connection(self):
-        "Return a connection instance, that supports the .cursor() method."
+        """Return a connection instance, that supports the .cursor() method."""
 
     def close(self):
         super().close()
         self._queue.shutdown()
+        if hasattr(self.thread_local, "conn"):
+            self.thread_local.conn.close()
 
     @property
     def is_autocommit(self) -> bool:

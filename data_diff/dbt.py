@@ -8,6 +8,8 @@ import keyring
 import pydantic
 import rich
 from rich.prompt import Prompt
+from rich.markdown import Markdown
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from data_diff.errors import (
     DataDiffCustomSchemaNoConfigError,
@@ -49,7 +51,8 @@ from data_diff.utils import (
 
 logger = getLogger(__name__)
 CLOUD_DOC_URL = "https://docs.datafold.com/development_testing/cloud"
-EXTENSION_INSTALL_URL = "https://get.datafold.com/datafold-vs-code-install"
+DATAFOLD_TRIAL_URL = "https://app.datafold.com/org-signup"
+DATAFOLD_INSTRUCTIONS_URL = "https://docs.datafold.com/development_testing/datafold_cloud"
 
 
 class TDiffVars(pydantic.BaseModel):
@@ -80,7 +83,6 @@ def dbt_diff(
     production_schema_flag: Optional[str] = None,
 ) -> None:
     print_version_info()
-    diff_threads = []
     set_entrypoint_name(os.getenv("DATAFOLD_TRIGGERED_BY", "CLI-dbt"))
     dbt_parser = DbtParser(profiles_dir_override, project_dir_override, state)
     models = dbt_parser.get_models(dbt_selection)
@@ -112,7 +114,11 @@ def dbt_diff(
     else:
         dbt_parser.set_connection()
 
-    with log_status_handler.status if log_status_handler else nullcontext():
+    futures = {}
+
+    with log_status_handler.status if log_status_handler else nullcontext(), ThreadPoolExecutor(
+        max_workers=dbt_parser.threads
+    ) as executor:
         for model in models:
             if log_status_handler:
                 log_status_handler.set_prefix(f"Diffing {model.alias} \n")
@@ -140,12 +146,12 @@ def dbt_diff(
 
             if diff_vars.primary_keys:
                 if is_cloud:
-                    diff_thread = run_as_daemon(
+                    future = executor.submit(
                         _cloud_diff, diff_vars, config.datasource_id, api, org_meta, log_status_handler
                     )
-                    diff_threads.append(diff_thread)
                 else:
-                    _local_diff(diff_vars, json_output)
+                    future = executor.submit(_local_diff, diff_vars, json_output, log_status_handler)
+                futures[future] = model
             else:
                 if json_output:
                     print(
@@ -165,10 +171,12 @@ def dbt_diff(
                         + "Skipped due to unknown primary key. Add uniqueness tests, meta, or tags.\n"
                     )
 
-        # wait for all threads
-        if diff_threads:
-            for thread in diff_threads:
-                thread.join()
+    for future in as_completed(futures):
+        model = futures[future]
+        try:
+            future.result()  # if error occurred, it will be raised here
+        except Exception as e:
+            logger.error(f"An error occurred during the execution of a diff task: {model.unique_id} - {e}")
 
     _extension_notification()
 
@@ -265,15 +273,17 @@ def _get_prod_path_from_manifest(model, prod_manifest) -> Union[Tuple[str, str, 
     return prod_database, prod_schema, prod_alias
 
 
-def _local_diff(diff_vars: TDiffVars, json_output: bool = False) -> None:
+def _local_diff(
+    diff_vars: TDiffVars, json_output: bool = False, log_status_handler: Optional[LogStatusHandler] = None
+) -> None:
+    if log_status_handler:
+        log_status_handler.diff_started(diff_vars.dev_path[-1])
     dev_qualified_str = ".".join(diff_vars.dev_path)
     prod_qualified_str = ".".join(diff_vars.prod_path)
     diff_output_str = _diff_output_base(dev_qualified_str, prod_qualified_str)
 
-    table1 = connect_to_table(
-        diff_vars.connection, prod_qualified_str, tuple(diff_vars.primary_keys), diff_vars.threads
-    )
-    table2 = connect_to_table(diff_vars.connection, dev_qualified_str, tuple(diff_vars.primary_keys), diff_vars.threads)
+    table1 = connect_to_table(diff_vars.connection, prod_qualified_str, tuple(diff_vars.primary_keys))
+    table2 = connect_to_table(diff_vars.connection, dev_qualified_str, tuple(diff_vars.primary_keys))
 
     try:
         table1_columns = table1.get_schema()
@@ -293,14 +303,25 @@ def _local_diff(diff_vars: TDiffVars, json_output: bool = False) -> None:
     columns_removed = table1_column_names.difference(table2_column_names)
     # col type is i = 1 in tuple
     columns_type_changed = {
-        k for k, v in table2_columns.items() if k in table1_columns and v[1] != table1_columns[k][1]
+        k for k, v in table2_columns.items() if k in table1_columns and v.data_type != table1_columns[k].data_type
     }
 
-    if columns_added:
-        diff_output_str += columns_added_template(columns_added)
+    diff_output_str += f"Primary Keys: {diff_vars.primary_keys} \n"
+
+    if diff_vars.where_filter:
+        diff_output_str += f"Where Filter: '{str(diff_vars.where_filter)}' \n"
+
+    if diff_vars.include_columns:
+        diff_output_str += f"Included Columns: {diff_vars.include_columns} \n"
+
+    if diff_vars.exclude_columns:
+        diff_output_str += f"Excluded Columns: {diff_vars.exclude_columns} \n"
 
     if columns_removed:
         diff_output_str += columns_removed_template(columns_removed)
+
+    if columns_added:
+        diff_output_str += columns_added_template(columns_added)
 
     if columns_type_changed:
         diff_output_str += columns_type_changed_template(columns_type_changed)
@@ -339,13 +360,14 @@ def _local_diff(diff_vars: TDiffVars, json_output: bool = False) -> None:
             return
 
         dataset1_columns = [
-            (name, type_, table1.database.dialect.parse_type(table1.table_path, name, type_, *other))
-            for (name, type_, *other) in table1_columns.values()
+            (info.column_name, info.data_type, table1.database.dialect.parse_type(table1.table_path, info))
+            for info in table1_columns.values()
         ]
         dataset2_columns = [
-            (name, type_, table2.database.dialect.parse_type(table2.table_path, name, type_, *other))
-            for (name, type_, *other) in table2_columns.values()
+            (info.column_name, info.data_type, table2.database.dialect.parse_type(table2.table_path, info))
+            for info in table2_columns.values()
         ]
+
         print(
             json.dumps(
                 jsonify(
@@ -372,6 +394,9 @@ def _local_diff(diff_vars: TDiffVars, json_output: bool = False) -> None:
     else:
         diff_output_str += no_differences_template()
         rich.print(diff_output_str)
+
+    if log_status_handler:
+        log_status_handler.diff_finished(diff_vars.dev_path[-1])
 
 
 def _initialize_api() -> Optional[DatafoldAPI]:
@@ -406,7 +431,7 @@ def _cloud_diff(
     log_status_handler: Optional[LogStatusHandler] = None,
 ) -> None:
     if log_status_handler:
-        log_status_handler.cloud_diff_started(diff_vars.dev_path[-1])
+        log_status_handler.diff_started(diff_vars.dev_path[-1])
     diff_output_str = _diff_output_base(".".join(diff_vars.dev_path), ".".join(diff_vars.prod_path))
     payload = TCloudApiDataDiff(
         data_source1_id=datasource_id,
@@ -442,32 +467,57 @@ def _cloud_diff(
         rows_removed_count = diff_results.pks.exclusives[0]
 
         rows_updated = diff_results.values.rows_with_differences
-        total_rows = diff_results.values.total_rows
-        rows_unchanged = int(total_rows) - int(rows_updated)
+        total_rows_table1 = diff_results.pks.total_rows[0]
+        total_rows_table2 = diff_results.pks.total_rows[1]
+        total_rows_diff = total_rows_table2 - total_rows_table1
+
+        rows_unchanged = int(total_rows_table1) - int(rows_updated) - int(rows_removed_count)
         diff_percent_list = {
-            x.column_name: str(x.match) + "%" for x in diff_results.values.columns_diff_stats if x.match != 100.0
+            x.column_name: f"{str(round(100.00 - x.match, 2))}%"
+            for x in diff_results.values.columns_diff_stats
+            if x.match != 100.0
         }
-        columns_added = diff_results.schema_.exclusive_columns[1]
-        columns_removed = diff_results.schema_.exclusive_columns[0]
+        columns_added = set(diff_results.schema_.exclusive_columns[1])
+        columns_removed = set(diff_results.schema_.exclusive_columns[0])
         column_type_changes = diff_results.schema_.column_type_differs
 
-        if columns_added:
-            diff_output_str += columns_added_template(columns_added)
+        diff_output_str += f"Primary Keys: {diff_vars.primary_keys} \n"
+        if diff_vars.where_filter:
+            diff_output_str += f"Where Filter: '{str(diff_vars.where_filter)}' \n"
+
+        if diff_vars.include_columns:
+            diff_output_str += f"Included Columns: {diff_vars.include_columns} \n"
+
+        if diff_vars.exclude_columns:
+            diff_output_str += f"Excluded Columns: {diff_vars.exclude_columns} \n"
 
         if columns_removed:
             diff_output_str += columns_removed_template(columns_removed)
 
+        if columns_added:
+            diff_output_str += columns_added_template(columns_added)
+
         if column_type_changes:
             diff_output_str += columns_type_changed_template(column_type_changes)
 
+        deps_impacts = {
+            key: len(value) + sum(len(item.get("BiHtSync", [])) for item in value) if key == "hightouch" else len(value)
+            for key, value in diff_results.deps.deps.items()
+        }
+
         if any([rows_added_count, rows_removed_count, rows_updated]):
             diff_output = dbt_diff_string_template(
-                rows_added_count,
-                rows_removed_count,
-                rows_updated,
-                str(rows_unchanged),
-                diff_percent_list,
-                "Value Match Percent:",
+                total_rows_table1=total_rows_table1,
+                total_rows_table2=total_rows_table2,
+                total_rows_diff=total_rows_diff,
+                rows_added=rows_added_count,
+                rows_removed=rows_removed_count,
+                rows_updated=rows_updated,
+                rows_unchanged=str(rows_unchanged),
+                deps_impacts=deps_impacts,
+                is_cloud=True,
+                extra_info_dict=diff_percent_list,
+                extra_info_str="Value Changed:",
             )
             diff_output_str += f"\n{diff_url}\n {diff_output} \n"
             rich.print(diff_output_str)
@@ -476,7 +526,7 @@ def _cloud_diff(
             rich.print(diff_output_str)
 
         if log_status_handler:
-            log_status_handler.cloud_diff_finished(diff_vars.dev_path[-1])
+            log_status_handler.diff_finished(diff_vars.dev_path[-1])
     except BaseException as ex:  # Catch KeyboardInterrupt too
         error = ex
     finally:
@@ -511,7 +561,7 @@ def _cloud_diff(
 
 
 def _diff_output_base(dev_path: str, prod_path: str) -> str:
-    return f"\n[green]{prod_path} <> {dev_path}[/] \n"
+    return f"\n[blue]{prod_path}[/] <> [green]{dev_path}[/] \n"
 
 
 def _initialize_events(dbt_user_id: Optional[str], dbt_version: Optional[str], dbt_project_id: Optional[str]) -> None:
@@ -547,6 +597,8 @@ def _email_signup() -> None:
 
 def _extension_notification() -> None:
     if bool_notify_about_extension():
-        rich.print(
-            f"\n\nHaving a good time diffing? :heart_eyes-emoji:\nMake sure to check out the free [bold]Datafold VS Code extension[/bold] for more a more seamless diff experience:\n{EXTENSION_INSTALL_URL}"
-        )
+        message = "\n\nHaving a good time diffing?\n\nMake sure to check out the free Datafold Cloud Trial for an evolved experience:\n\n- value-level diffs\n- column-level lineage\n"
+        rich.print(message)
+        rich.print(Markdown(f"[Sign Up Here]({DATAFOLD_TRIAL_URL})"))
+        rich.print("")
+        rich.print(Markdown(f"[Follow the instructions to get started]({DATAFOLD_INSTRUCTIONS_URL})"))

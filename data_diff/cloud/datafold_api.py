@@ -144,18 +144,22 @@ class TSummaryResultSchemaStats(pydantic.BaseModel):
     exclusive_columns: Tuple[List[str], List[str]]
 
 
+class TSummaryResultDependencyDetails(pydantic.BaseModel):
+    deps: Dict[str, List[Dict]]
+
+
 class TCloudApiDataDiffSummaryResult(pydantic.BaseModel):
     status: str
     pks: Optional[TSummaryResultPrimaryKeyStats]
     values: Optional[TSummaryResultValueStats]
     schema_: Optional[TSummaryResultSchemaStats]
-    dependencies: Optional[Dict[str, Any]]
+    deps: Optional[TSummaryResultDependencyDetails]
 
     @classmethod
     def from_orm(cls, obj: Any) -> Self:
         pks = TSummaryResultPrimaryKeyStats(**obj["pks"]) if "pks" in obj else None
         values = TSummaryResultValueStats(**obj["values"]) if "values" in obj else None
-        deps = obj["deps"] if "deps" in obj else None
+        deps = TSummaryResultDependencyDetails(**obj["dependencies"]) if "dependencies" in obj else None
         schema = TSummaryResultSchemaStats(**obj["schema"]) if "schema" in obj else None
         return cls(
             status=obj["status"],
@@ -185,7 +189,7 @@ class DatafoldAPI:
     host: str = "https://app.datafold.com"
     timeout: int = 30
 
-    def __attrs_post_init__(self):
+    def __attrs_post_init__(self) -> None:
         self.host = self.host.rstrip("/")
         self.headers = {
             "Authorization": f"Key {self.api_key}",

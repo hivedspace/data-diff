@@ -22,6 +22,7 @@ from data_diff.dbt import (
 from data_diff.dbt_parser import (
     TDatadiffConfig,
 )
+from data_diff.schema import RawColumnInfo
 from tests.test_cli import run_datadiff_cli
 
 
@@ -35,15 +36,104 @@ class TestDbtDiffer(unittest.TestCase):
             "--dbt", "--dbt-project-dir", test_project_path, "--dbt-profiles-dir", test_profiles_path
         )
 
+        orders_expected_output = """
+        jaffle_shop.prod.orders <> jaffle_shop.dev.orders 
+        Primary Keys: ['order_id'] 
+        Where Filter: 'amount >= 0' 
+        Included Columns: ['order_id', 'customer_id', 'order_date', 'amount', 'credit_card_amount', 'coupon_amount', 
+        'bank_transfer_amount', 'gift_card_amount'] 
+        Excluded Columns: ['new_column'] 
+        Columns removed [-1]: {'status'}
+        Columns added [+1]: {'new_column'}
+        Type changed [1]: {'order_date'}
+
+        rows       PROD    <>            DEV
+        ---------  ------  ------------  -----------------
+        Total      10                    11 [+1]
+        Added              +2
+        Removed            -1
+        Different          9
+        Unchanged          0
+
+        columns                 # diff values
+        --------------------  ---------------
+        amount                              8
+        bank_transfer_amount                3
+        coupon_amount                       3
+        credit_card_amount                  6
+        customer_id                         9
+        gift_card_amount                    2 
+        """
+
+        stg_payments_expected_output = """
+        jaffle_shop.prod.stg_payments <> jaffle_shop.dev.stg_payments 
+        Primary Keys: ['payment_id'] 
+        No row differences
+        """
+
+        stg_customers_expected_output = """
+        jaffle_shop.prod.stg_customers <> jaffle_shop.dev.stg_customers 
+        Primary Keys: ['customer_id'] 
+        No row differences
+        """
+
+        stg_orders_expected_output = """
+        jaffle_shop.prod.stg_orders <> jaffle_shop.dev.stg_orders 
+        Primary Keys: ['order_id'] 
+        No row differences
+        """
+
+        customers_expected_output = """
+        jaffle_shop.prod.customers <> jaffle_shop.dev.customers 
+        Primary Keys: ['customer_id'] 
+        No row differences
+        """
+
+        expected_outputs = [
+            orders_expected_output,
+            stg_payments_expected_output,
+            stg_customers_expected_output,
+            stg_orders_expected_output,
+            customers_expected_output,
+        ]
+
+        if test_project_path == artifacts_path:
+            actual_output_stripped = b"".join(diff).decode("utf-8").strip().replace(" ", "")
+
+            for expected_output in expected_outputs:
+                expected_output_stripped = "".join(line.strip() for line in expected_output.split("\n")).replace(
+                    " ", ""
+                )
+                assert expected_output_stripped in actual_output_stripped
+
+    @unittest.skipIf(
+        not os.environ.get("MOTHERDUCK_TOKEN"),
+        "MOTHERDUCK_TOKEN doesn't exist or is empty if this is run from a forked branch pull request",
+    )
+    def test_integration_motherduck_dbt(self):
+        artifacts_path = os.getcwd() + "/tests/dbt_artifacts"
+        test_project_path = os.environ.get("DATA_DIFF_DBT_PROJ") or artifacts_path
+        test_profiles_path = os.environ.get("DATA_DIFF_DBT_PROJ") or artifacts_path + "/motherduck"
+        diff = run_datadiff_cli(
+            "--dbt", "--dbt-project-dir", test_project_path, "--dbt-profiles-dir", test_profiles_path
+        )
+
         # assertions for the diff that exists in tests/dbt_artifacts/jaffle_shop.duckdb
         if test_project_path == artifacts_path:
             diff_string = b"".join(diff).decode("utf-8")
-            # 5 diffs were ran
-            assert diff_string.count("<>") == 5
             # 4 with no diffs
             assert diff_string.count("No row differences") == 4
             # 1 with a diff
-            assert diff_string.count("  Rows Added    Rows Removed") == 1
+            assert diff_string.count("PROD") == 1
+            assert diff_string.count("DEV") == 1
+            assert diff_string.count("Primary Keys") == 5
+            assert diff_string.count("Where Filter") == 1
+            assert diff_string.count("Type Changed") == 0
+            assert diff_string.count("Total") == 1
+            assert diff_string.count("Added") == 1
+            assert diff_string.count("Removed") == 1
+            assert diff_string.count("Different") == 1
+            assert diff_string.count("Unchanged") == 1
 
     def test_integration_cloud_dbt(self):
         project_dir = os.environ.get("DATA_DIFF_DBT_PROJ")
@@ -57,7 +147,10 @@ class TestDbtDiffer(unittest.TestCase):
     def test_local_diff(self, mock_diff_tables):
         connection = {}
         mock_table1 = Mock()
-        column_dictionary = {"col1": ("col1", "type"), "col2": ("col2", "type")}
+        column_dictionary = {
+            "col1": RawColumnInfo(column_name="col1", data_type="type"),
+            "col2": RawColumnInfo(column_name="col2", data_type="type"),
+        }
         mock_table1.get_schema.return_value = column_dictionary
         mock_table2 = Mock()
         mock_table2.get_schema.return_value = column_dictionary
@@ -93,8 +186,8 @@ class TestDbtDiffer(unittest.TestCase):
         )
         self.assertEqual(len(mock_diff_tables.call_args[1]["extra_columns"]), 2)
         self.assertEqual(mock_connect.call_count, 2)
-        mock_connect.assert_any_call(connection, ".".join(dev_qualified_list), tuple(expected_primary_keys), threads)
-        mock_connect.assert_any_call(connection, ".".join(prod_qualified_list), tuple(expected_primary_keys), threads)
+        mock_connect.assert_any_call(connection, ".".join(dev_qualified_list), tuple(expected_primary_keys))
+        mock_connect.assert_any_call(connection, ".".join(prod_qualified_list), tuple(expected_primary_keys))
         mock_diff.get_stats_string.assert_called_once()
 
     @patch("data_diff.dbt.diff_tables")
@@ -102,8 +195,14 @@ class TestDbtDiffer(unittest.TestCase):
         connection = {}
         mock_table1 = Mock()
         mock_table2 = Mock()
-        table1_column_dictionary = {"col1": ("col1", "type"), "col2": ("col2", "type")}
-        table2_column_dictionary = {"col1": ("col1", "type"), "col2": ("col2", "differing_type")}
+        table1_column_dictionary = {
+            "col1": RawColumnInfo(column_name="col1", data_type="type"),
+            "col2": RawColumnInfo(column_name="col2", data_type="type"),
+        }
+        table2_column_dictionary = {
+            "col1": RawColumnInfo(column_name="col1", data_type="type"),
+            "col2": RawColumnInfo(column_name="col2", data_type="differing_type"),
+        }
         mock_table1.get_schema.return_value = table1_column_dictionary
         mock_table2.get_schema.return_value = table2_column_dictionary
         mock_diff = MagicMock()
@@ -143,7 +242,10 @@ class TestDbtDiffer(unittest.TestCase):
     @patch("data_diff.dbt.diff_tables")
     def test_local_diff_no_diffs(self, mock_diff_tables):
         connection = {}
-        column_dictionary = {"col1": ("col1", "type"), "col2": ("col2", "type")}
+        column_dictionary = {
+            "col1": RawColumnInfo(column_name="col1", data_type="type"),
+            "col2": RawColumnInfo(column_name="col2", data_type="type"),
+        }
         mock_table1 = Mock()
         mock_table1.get_schema.return_value = column_dictionary
         mock_table2 = Mock()
@@ -180,8 +282,8 @@ class TestDbtDiffer(unittest.TestCase):
         )
         self.assertEqual(len(mock_diff_tables.call_args[1]["extra_columns"]), 2)
         self.assertEqual(mock_connect.call_count, 2)
-        mock_connect.assert_any_call(connection, ".".join(dev_qualified_list), tuple(expected_primary_keys), None)
-        mock_connect.assert_any_call(connection, ".".join(prod_qualified_list), tuple(expected_primary_keys), None)
+        mock_connect.assert_any_call(connection, ".".join(dev_qualified_list), tuple(expected_primary_keys))
+        mock_connect.assert_any_call(connection, ".".join(prod_qualified_list), tuple(expected_primary_keys))
         mock_diff.get_stats_string.assert_not_called()
 
     @patch("data_diff.dbt.rich.print")
@@ -196,6 +298,8 @@ class TestDbtDiffer(unittest.TestCase):
         expected_primary_keys = ["primary_key_column"]
         threads = None
         where = "a_string"
+        include_columns = ["created_at", "num_users", "sub_created_at", "sub_plan"]
+        exclude_columns = ["new_column"]
         connection = {}
         mock_api.create_data_diff.return_value = {"id": 123}
         mock_os_environ.get.return_value = expected_api_key
@@ -207,8 +311,8 @@ class TestDbtDiffer(unittest.TestCase):
             connection=connection,
             threads=threads,
             where_filter=where,
-            include_columns=[],
-            exclude_columns=[],
+            include_columns=include_columns,
+            exclude_columns=exclude_columns,
         )
 
         _cloud_diff(diff_vars, expected_datasource_id, org_meta=org_meta, api=mock_api)
@@ -222,8 +326,8 @@ class TestDbtDiffer(unittest.TestCase):
         self.assertEqual(payload.table1, prod_qualified_list)
         self.assertEqual(payload.table2, dev_qualified_list)
         self.assertEqual(payload.pk_columns, expected_primary_keys)
-        self.assertEqual(payload.filter1, where)
-        self.assertEqual(payload.filter2, where)
+        self.assertEqual(payload.include_columns, include_columns)
+        self.assertEqual(payload.exclude_columns, exclude_columns)
 
     @patch("data_diff.dbt._initialize_api")
     @patch("data_diff.dbt._get_diff_vars")
@@ -248,6 +352,7 @@ class TestDbtDiffer(unittest.TestCase):
         where = "a_string"
         config = TDatadiffConfig(prod_database="prod_db", prod_schema="prod_schema", datasource_id=1)
         mock_dbt_parser_inst = Mock()
+        mock_dbt_parser_inst.threads = threads
         mock_model = Mock()
         mock_api.get_data_source.return_value = TCloudApiDataSource(id=1, type="snowflake", name="snowflake")
         mock_initialize_api.return_value = mock_api
@@ -386,6 +491,7 @@ class TestDbtDiffer(unittest.TestCase):
         threads = None
         where = "a_string"
         mock_dbt_parser_inst = Mock()
+        mock_dbt_parser_inst.threads = threads
         mock_dbt_parser.return_value = mock_dbt_parser_inst
         mock_model = Mock()
         mock_dbt_parser_inst.get_models.return_value = [mock_model]
@@ -407,7 +513,7 @@ class TestDbtDiffer(unittest.TestCase):
         mock_dbt_parser_inst.get_models.assert_called_once()
         mock_dbt_parser_inst.set_connection.assert_called_once()
         mock_cloud_diff.assert_not_called()
-        mock_local_diff.assert_called_once_with(diff_vars, False)
+        mock_local_diff.assert_called_once_with(diff_vars, False, None)
         mock_print.assert_not_called()
 
     @patch("data_diff.dbt._get_diff_vars")
@@ -423,6 +529,7 @@ class TestDbtDiffer(unittest.TestCase):
         threads = None
         where = "a_string"
         mock_dbt_parser_inst = Mock()
+        mock_dbt_parser_inst.threads = threads
         mock_dbt_parser.return_value = mock_dbt_parser_inst
         mock_model = Mock()
         mock_dbt_parser_inst.get_models.return_value = [mock_model]
@@ -460,6 +567,7 @@ class TestDbtDiffer(unittest.TestCase):
         threads = None
         where = "a_string"
         mock_dbt_parser_inst = Mock()
+        mock_dbt_parser_inst.threads = threads
         mock_dbt_parser.return_value = mock_dbt_parser_inst
         mock_model = Mock()
         mock_dbt_parser_inst.get_models.return_value = [mock_model]
@@ -481,7 +589,7 @@ class TestDbtDiffer(unittest.TestCase):
         mock_dbt_parser_inst.get_models.assert_called_once()
         mock_dbt_parser_inst.set_connection.assert_called_once()
         mock_cloud_diff.assert_not_called()
-        mock_local_diff.assert_called_once_with(diff_vars, False)
+        mock_local_diff.assert_called_once_with(diff_vars, False, None)
         mock_print.assert_not_called()
 
     @patch("data_diff.dbt._get_diff_vars")
@@ -497,6 +605,7 @@ class TestDbtDiffer(unittest.TestCase):
         threads = None
         where = "a_string"
         mock_dbt_parser_inst = Mock()
+        mock_dbt_parser_inst.threads = threads
         mock_dbt_parser.return_value = mock_dbt_parser_inst
         mock_model = Mock()
         mock_dbt_parser_inst.get_models.return_value = [mock_model]
@@ -518,7 +627,7 @@ class TestDbtDiffer(unittest.TestCase):
         mock_dbt_parser_inst.get_models.assert_called_once()
         mock_dbt_parser_inst.set_connection.assert_called_once()
         mock_cloud_diff.assert_not_called()
-        mock_local_diff.assert_called_once_with(diff_vars, False)
+        mock_local_diff.assert_called_once_with(diff_vars, False, None)
         mock_print.assert_not_called()
 
     @patch("data_diff.dbt._initialize_api")
@@ -543,6 +652,7 @@ class TestDbtDiffer(unittest.TestCase):
         mock_model = Mock()
         connection = {}
         threads = None
+        mock_dbt_parser_inst.threads = threads
         where = "a_string"
         config = TDatadiffConfig(prod_database="prod_db", prod_schema="prod_schema", datasource_id=1)
         mock_api = Mock()
@@ -584,6 +694,7 @@ class TestDbtDiffer(unittest.TestCase):
         threads = None
         where = "a_string"
         mock_dbt_parser_inst = Mock()
+        mock_dbt_parser_inst.threads = threads
         mock_dbt_parser.return_value = mock_dbt_parser_inst
         mock_model = Mock()
         mock_dbt_parser_inst.get_models.return_value = [mock_model]

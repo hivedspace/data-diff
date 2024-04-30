@@ -1,16 +1,17 @@
-"""Provides classes for performing a table diff
-"""
+"""Provides classes for performing a table diff"""
 
+import threading
 import time
 from abc import ABC, abstractmethod
 from enum import Enum
 from contextlib import contextmanager
 from operator import methodcaller
-from typing import Dict, Tuple, Iterator, Optional
+from typing import Any, Dict, Set, List, Tuple, Iterator, Optional, Union
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import attrs
 
+from data_diff.errors import DataDiffMismatchingKeyTypesError
 from data_diff.info_tree import InfoTree, SegmentInfo
 from data_diff.utils import dbt_diff_string_template, run_as_daemon, safezip, getLogger, truncate_error, Vector
 from data_diff.thread_utils import ThreadedYielder
@@ -29,6 +30,7 @@ class Algorithm(Enum):
 
 
 DiffResult = Iterator[Tuple[str, tuple]]  # Iterator[Tuple[Literal["+", "-"], tuple]]
+DiffResultList = Iterator[List[Tuple[str, tuple]]]
 
 
 @attrs.define(frozen=False)
@@ -89,7 +91,7 @@ class DiffResultWrapper:
     stats: dict
     result_list: list = attrs.field(factory=list)
 
-    def __iter__(self):
+    def __iter__(self) -> Iterator[Any]:
         yield from self.result_list
         for i in self.diff:
             self.result_list.append(i)
@@ -137,14 +139,19 @@ class DiffResultWrapper:
     def get_stats_string(self, is_dbt: bool = False):
         diff_stats = self._get_stats(is_dbt)
 
+        total_rows_diff = diff_stats.table2_count - diff_stats.table1_count
+
         if is_dbt:
             string_output = dbt_diff_string_template(
-                diff_stats.diff_by_sign["+"],
-                diff_stats.diff_by_sign["-"],
-                diff_stats.diff_by_sign["!"],
-                diff_stats.unchanged,
-                diff_stats.extra_column_diffs,
-                "Values Updated:",
+                total_rows_table1=diff_stats.table1_count,
+                total_rows_table2=diff_stats.table2_count,
+                total_rows_diff=total_rows_diff,
+                rows_added=diff_stats.diff_by_sign["+"],
+                rows_removed=diff_stats.diff_by_sign["-"],
+                rows_updated=diff_stats.diff_by_sign["!"],
+                rows_unchanged=diff_stats.unchanged,
+                extra_info_dict=diff_stats.extra_column_diffs,
+                extra_info_str="[u]Values Changed[/u]",
             )
 
         else:
@@ -182,8 +189,15 @@ class DiffResultWrapper:
 
 @attrs.define(frozen=False)
 class TableDiffer(ThreadBase, ABC):
+    INFO_TREE_CLASS = InfoTree
+
     bisection_factor = 32
     stats: dict = {}
+
+    ignored_columns1: Set[str] = attrs.field(factory=set)
+    ignored_columns2: Set[str] = attrs.field(factory=set)
+    _ignored_columns_lock: threading.Lock = attrs.field(factory=threading.Lock, init=False)
+    yield_list: bool = False
 
     def diff_tables(self, table1: TableSegment, table2: TableSegment, info_tree: InfoTree = None) -> DiffResultWrapper:
         """Diff the given tables.
@@ -199,12 +213,15 @@ class TableDiffer(ThreadBase, ABC):
             Where `row` is a tuple of values, corresponding to the diffed columns.
         """
         if info_tree is None:
-            info_tree = InfoTree(SegmentInfo([table1, table2]))
+            segment_info = self.INFO_TREE_CLASS.SEGMENT_INFO_CLASS([table1, table2])
+            info_tree = self.INFO_TREE_CLASS(segment_info)
         return DiffResultWrapper(self._diff_tables_wrapper(table1, table2, info_tree), info_tree, self.stats)
 
     def _diff_tables_wrapper(self, table1: TableSegment, table2: TableSegment, info_tree: InfoTree) -> DiffResult:
         if is_tracking_enabled():
             options = attrs.asdict(self, recurse=False)
+            # not a useful event attribute
+            options.pop("_ignored_columns_lock")
             options["differ_name"] = type(self).__name__
             event_json = create_start_event_json(options)
             run_as_daemon(send_event_json, event_json)
@@ -252,7 +269,9 @@ class TableDiffer(ThreadBase, ABC):
     def _validate_and_adjust_columns(self, table1: TableSegment, table2: TableSegment) -> None:
         pass
 
-    def _diff_tables_root(self, table1: TableSegment, table2: TableSegment, info_tree: InfoTree) -> DiffResult:
+    def _diff_tables_root(
+        self, table1: TableSegment, table2: TableSegment, info_tree: InfoTree
+    ) -> Union[DiffResult, DiffResultList]:
         return self._bisect_and_diff_tables(table1, table2, info_tree)
 
     @abstractmethod
@@ -266,8 +285,7 @@ class TableDiffer(ThreadBase, ABC):
         level=0,
         segment_index=None,
         segment_count=None,
-    ):
-        ...
+    ): ...
 
     def _bisect_and_diff_tables(self, table1: TableSegment, table2: TableSegment, info_tree):
         if len(table1.key_columns) != len(table2.key_columns):
@@ -280,9 +298,13 @@ class TableDiffer(ThreadBase, ABC):
             if not isinstance(kt, IKey):
                 raise NotImplementedError(f"Cannot use a column of type {kt} as a key")
 
-        for kt1, kt2 in safezip(key_types1, key_types2):
+        for i, (kt1, kt2) in enumerate(safezip(key_types1, key_types2)):
             if kt1.python_type is not kt2.python_type:
-                raise TypeError(f"Incompatible key types: {kt1} and {kt2}")
+                k1 = table1.key_columns[i]
+                k2 = table2.key_columns[i]
+                raise DataDiffMismatchingKeyTypesError(
+                    f"Key columns {k1} and {k2} can't be compared due to different types."
+                )
 
         # Query min/max values
         key_ranges = self._threaded_call_as_completed("query_key_range", [table1, table2])
@@ -290,16 +312,17 @@ class TableDiffer(ThreadBase, ABC):
         # Start with the first completed value, so we don't waste time waiting
         min_key1, max_key1 = self._parse_key_range_result(key_types1, next(key_ranges))
 
-        btable1, btable2 = [t.new_key_bounds(min_key=min_key1, max_key=max_key1) for t in (table1, table2)]
+        btable1 = table1.new_key_bounds(min_key=min_key1, max_key=max_key1, key_types=key_types1)
+        btable2 = table2.new_key_bounds(min_key=min_key1, max_key=max_key1, key_types=key_types2)
 
         logger.info(
             f"Diffing segments at key-range: {btable1.min_key}..{btable2.max_key}. "
             f"size: table1 <= {btable1.approximate_size()}, table2 <= {btable2.approximate_size()}"
         )
 
-        ti = ThreadedYielder(self.max_threadpool_size)
+        ti = ThreadedYielder(self.max_threadpool_size, self.yield_list)
         # Bisect (split) the table into segments, and diff them recursively.
-        ti.submit(self._bisect_and_diff_segments, ti, btable1, btable2, info_tree)
+        ti.submit(self._bisect_and_diff_segments, ti, btable1, btable2, info_tree, priority=999)
 
         # Now we check for the second min-max, to diff the portions we "missed".
         # This is achieved by subtracting the table ranges, and dividing the resulting space into aligned boxes.
@@ -314,7 +337,8 @@ class TableDiffer(ThreadBase, ABC):
         # └──┴──────┴──┘
         # Overall, the max number of new regions in this 2nd pass is 3^|k| - 1
 
-        min_key2, max_key2 = self._parse_key_range_result(key_types1, next(key_ranges))
+        # Note: python types can be the same, but the rendering parameters (e.g. casing) can differ.
+        min_key2, max_key2 = self._parse_key_range_result(key_types2, next(key_ranges))
 
         points = [list(sorted(p)) for p in safezip(min_key1, min_key2, max_key1, max_key2)]
         box_mesh = create_mesh_from_points(*points)
@@ -322,8 +346,9 @@ class TableDiffer(ThreadBase, ABC):
         new_regions = [(p1, p2) for p1, p2 in box_mesh if p1 < p2 and not (p1 >= min_key1 and p2 <= max_key1)]
 
         for p1, p2 in new_regions:
-            extra_tables = [t.new_key_bounds(min_key=p1, max_key=p2) for t in (table1, table2)]
-            ti.submit(self._bisect_and_diff_segments, ti, *extra_tables, info_tree)
+            extra_table1 = table1.new_key_bounds(min_key=p1, max_key=p2, key_types=key_types1)
+            extra_table2 = table2.new_key_bounds(min_key=p1, max_key=p2, key_types=key_types2)
+            ti.submit(self._bisect_and_diff_segments, ti, extra_table1, extra_table2, info_tree, priority=999)
 
         return ti
 
@@ -354,6 +379,11 @@ class TableDiffer(ThreadBase, ABC):
         biggest_table = max(table1, table2, key=methodcaller("approximate_size"))
         checkpoints = biggest_table.choose_checkpoints(self.bisection_factor - 1)
 
+        # Get it thread-safe, to avoid segment misalignment because of bad timing.
+        with self._ignored_columns_lock:
+            table1 = attrs.evolve(table1, ignored_columns=frozenset(self.ignored_columns1))
+            table2 = attrs.evolve(table2, ignored_columns=frozenset(self.ignored_columns2))
+
         # Create new instances of TableSegment between each checkpoint
         segmented1 = table1.segment_by_checkpoints(checkpoints)
         segmented2 = table2.segment_by_checkpoints(checkpoints)
@@ -364,3 +394,24 @@ class TableDiffer(ThreadBase, ABC):
             ti.submit(
                 self._diff_segments, ti, t1, t2, info_node, max_rows, level + 1, i + 1, len(segmented1), priority=level
             )
+
+    def ignore_column(self, column_name1: str, column_name2: str) -> None:
+        """
+        Ignore the column (by name on sides A & B) in md5s & diffs from now on.
+
+        This affects 2 places:
+
+        - The columns are not checksumed for new(!) segments.
+        - The columns are ignored in in-memory diffing for running segments.
+
+        The columns are never ignored in the fetched values, whether they are
+        the same or different — for data consistency.
+
+        Use this feature to collect relatively well-represented differences
+        across all columns if one of them is highly different in the beginning
+        of a table (as per the order of segmentation/bisection). Otherwise,
+        that one column might easily hit the limit and stop the whole diff.
+        """
+        with self._ignored_columns_lock:
+            self.ignored_columns1.add(column_name1)
+            self.ignored_columns2.add(column_name2)

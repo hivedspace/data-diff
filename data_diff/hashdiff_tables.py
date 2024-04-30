@@ -2,9 +2,10 @@ import os
 from numbers import Number
 import logging
 from collections import defaultdict
-from typing import Iterator
+from typing import Any, Collection, Dict, Iterator, List, Sequence, Set, Tuple
 
 import attrs
+from typing_extensions import Literal
 
 from data_diff.abcs.database_types import ColType_UUID, NumericType, PrecisionType, StringType, Boolean, JSON
 from data_diff.info_tree import InfoTree
@@ -20,25 +21,57 @@ DEFAULT_BISECTION_FACTOR = 32
 
 logger = logging.getLogger("hashdiff_tables")
 
+# Just for local readability: TODO: later switch to real type declarations of these.
+_Op = Literal["+", "-"]
+_PK = Sequence[Any]
+_Row = Tuple[Any]
 
-def diff_sets(a: list, b: list, json_cols: dict = None) -> Iterator:
-    sa = set(a)
-    sb = set(b)
 
-    # The first item is always the key (see TableDiffer.relevant_columns)
-    # TODO update when we add compound keys to hashdiff
-    d = defaultdict(list)
+def diff_sets(
+    a: Sequence[_Row],
+    b: Sequence[_Row],
+    *,
+    json_cols: dict = None,
+    columns1: Sequence[str],
+    columns2: Sequence[str],
+    key_columns1: Sequence[str],
+    key_columns2: Sequence[str],
+    ignored_columns1: Collection[str],
+    ignored_columns2: Collection[str],
+) -> Iterator:
+    # Group full rows by PKs on each side. The first items are the PK: TableSegment.relevant_columns
+    rows_by_pks1: Dict[_PK, List[_Row]] = defaultdict(list)
+    rows_by_pks2: Dict[_PK, List[_Row]] = defaultdict(list)
     for row in a:
-        if row not in sb:
-            d[row[0]].append(("-", row))
+        pk: _PK = tuple(val for col, val in zip(key_columns1, row))
+        rows_by_pks1[pk].append(row)
     for row in b:
-        if row not in sa:
-            d[row[0]].append(("+", row))
+        pk: _PK = tuple(val for col, val in zip(key_columns2, row))
+        rows_by_pks2[pk].append(row)
+
+    # Mind that the same pk MUST go in full with all the -/+ rows all at once, for grouping.
+    diffs_by_pks: Dict[_PK, List[Tuple[_Op, _Row]]] = defaultdict(list)
+    for pk in sorted(set(rows_by_pks1) | set(rows_by_pks2)):
+        cutrows1: List[_Row] = [
+            tuple(val for col, val in zip(columns1, row1) if col not in ignored_columns1) for row1 in rows_by_pks1[pk]
+        ]
+        cutrows2: List[_Row] = [
+            tuple(val for col, val in zip(columns2, row2) if col not in ignored_columns2) for row2 in rows_by_pks2[pk]
+        ]
+
+        # Either side has 0 rows: a clearly exclusive row.
+        # Either side has 2+ rows: duplicates on either side, yield it all regardless of values.
+        # Both sides == 1: non-duplicate, non-exclusive, so check for values of interest.
+        if len(cutrows1) != 1 or len(cutrows2) != 1 or cutrows1 != cutrows2:
+            for row1 in rows_by_pks1[pk]:
+                diffs_by_pks[pk].append(("-", row1))
+            for row2 in rows_by_pks2[pk]:
+                diffs_by_pks[pk].append(("+", row2))
 
     warned_diff_cols = set()
-    for _k, v in sorted(d.items(), key=lambda i: i[0]):
+    for diffs in (diffs_by_pks[pk] for pk in sorted(diffs_by_pks)):
         if json_cols:
-            parsed_match, overriden_diff_cols = diffs_are_equiv_jsons(v, json_cols)
+            parsed_match, overriden_diff_cols = diffs_are_equiv_jsons(diffs, json_cols)
             if parsed_match:
                 to_warn = overriden_diff_cols - warned_diff_cols
                 for w in to_warn:
@@ -48,7 +81,7 @@ def diff_sets(a: list, b: list, json_cols: dict = None) -> Iterator:
                     )
                     warned_diff_cols.add(w)
                 continue
-        yield from v
+        yield from diffs
 
 
 @attrs.define(frozen=False)
@@ -75,7 +108,7 @@ class HashDiffer(TableDiffer):
 
     stats: dict = attrs.field(factory=dict)
 
-    def __attrs_post_init__(self):
+    def __attrs_post_init__(self) -> None:
         # Validate options
         if self.bisection_factor >= self.bisection_threshold:
             raise ValueError("Incorrect param values (bisection factor must be lower than threshold)")
@@ -92,9 +125,12 @@ class HashDiffer(TableDiffer):
             # Update schemas to minimal mutual precision
             col1 = table1._schema[c1]
             col2 = table2._schema[c2]
-            if isinstance(col1, PrecisionType) and isinstance(col2, PrecisionType):
-                if strict and not isinstance(col2, PrecisionType):
-                    raise TypeError(f"Incompatible types for column '{c1}':  {col1} <-> {col2}")
+            if isinstance(col1, PrecisionType):
+                if not isinstance(col2, PrecisionType):
+                    if strict:
+                        raise TypeError(f"Incompatible types for column '{c1}':  {col1} <-> {col2}")
+                    else:
+                        continue
 
                 lowest = min(col1, col2, key=lambda col: col.precision)
 
@@ -104,9 +140,12 @@ class HashDiffer(TableDiffer):
                 table1._schema[c1] = attrs.evolve(col1, precision=lowest.precision, rounds=lowest.rounds)
                 table2._schema[c2] = attrs.evolve(col2, precision=lowest.precision, rounds=lowest.rounds)
 
-            elif isinstance(col1, (NumericType, Boolean)) and isinstance(col2, (NumericType, Boolean)):
-                if strict and not isinstance(col2, (NumericType, Boolean)):
-                    raise TypeError(f"Incompatible types for column '{c1}':  {col1} <-> {col2}")
+            elif isinstance(col1, (NumericType, Boolean)):
+                if not isinstance(col2, (NumericType, Boolean)):
+                    if strict:
+                        raise TypeError(f"Incompatible types for column '{c1}':  {col1} <-> {col2}")
+                    else:
+                        continue
 
                 lowest = min(col1, col2, key=lambda col: col.precision)
 
@@ -117,14 +156,6 @@ class HashDiffer(TableDiffer):
                     table1._schema[c1] = attrs.evolve(col1, precision=lowest.precision)
                 if lowest.precision != col2.precision:
                     table2._schema[c2] = attrs.evolve(col2, precision=lowest.precision)
-
-            elif isinstance(col1, ColType_UUID):
-                if strict and not isinstance(col2, ColType_UUID):
-                    raise TypeError(f"Incompatible types for column '{c1}':  {col1} <-> {col2}")
-
-            elif isinstance(col1, StringType):
-                if strict and not isinstance(col2, StringType):
-                    raise TypeError(f"Incompatible types for column '{c1}':  {col1} <-> {col2}")
 
         for t in [table1, table2]:
             for c in t.relevant_columns:
@@ -209,7 +240,19 @@ class HashDiffer(TableDiffer):
                 for i, colname in enumerate(table1.extra_columns)
                 if isinstance(table1._schema[colname], JSON)
             }
-            diff = list(diff_sets(rows1, rows2, json_cols))
+            diff = list(
+                diff_sets(
+                    rows1,
+                    rows2,
+                    json_cols=json_cols,
+                    columns1=table1.relevant_columns,
+                    columns2=table2.relevant_columns,
+                    key_columns1=table1.key_columns,
+                    key_columns2=table2.key_columns,
+                    ignored_columns1=self.ignored_columns1,
+                    ignored_columns2=self.ignored_columns2,
+                )
+            )
 
             info_tree.info.set_diff(diff)
             info_tree.info.rowcounts = {1: len(rows1), 2: len(rows2)}

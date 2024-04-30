@@ -18,7 +18,10 @@ from data_diff.abcs.database_types import (
     FractionalType,
     TemporalType,
     Boolean,
-    UnknownColType, Geography,
+    UnknownColType,
+    Geography,
+    Time,
+    Date,
 )
 from data_diff.databases.base import (
     BaseDialect,
@@ -33,6 +36,7 @@ from data_diff.databases.base import (
     MD5_HEXDIGITS,
 )
 from data_diff.databases.base import TIMESTAMP_PRECISION_POS, ThreadLocalInterpreter
+from data_diff.schema import RawColumnInfo
 
 
 @import_helper(text="Please install BigQuery and configure your google-cloud access.")
@@ -62,6 +66,8 @@ class Dialect(BaseDialect):
         # Dates
         "TIMESTAMP": Timestamp,
         "DATETIME": Datetime,
+        "DATE": Date,
+        "TIME": Time,
         # Numbers
         "INT64": Integer,
         "INT32": Integer,
@@ -76,14 +82,19 @@ class Dialect(BaseDialect):
     }
     TYPE_ARRAY_RE = re.compile(r"ARRAY<(.+)>")
     TYPE_STRUCT_RE = re.compile(r"STRUCT<(.+)>")
+    # [BIG]NUMERIC, [BIG]NUMERIC(precision, scale), [BIG]NUMERIC(precision)
+    TYPE_NUMERIC_RE = re.compile(r"^((BIG)?NUMERIC)(?:\((\d+)(?:, (\d+))?\))?$")
+    # https://cloud.google.com/bigquery/docs/reference/standard-sql/data-types#parameterized_decimal_type
+    # The default scale is 9, which means a number can have up to 9 digits after the decimal point.
+    DEFAULT_NUMERIC_PRECISION = 9
 
     def random(self) -> str:
         return "RAND()"
 
-    def quote(self, s: str):
+    def quote(self, s: str) -> str:
         return f"`{s}`"
 
-    def to_string(self, s: str):
+    def to_string(self, s: str) -> str:
         return f"cast({s} as string)"
 
     def type_repr(self, t) -> str:
@@ -92,29 +103,45 @@ class Dialect(BaseDialect):
         except KeyError:
             return super().type_repr(t)
 
-    def parse_type(
-        self,
-        table_path: DbPath,
-        col_name: str,
-        type_repr: str,
-        *args: Any,  # pass-through args
-        **kwargs: Any,  # pass-through args
-    ) -> ColType:
-        col_type = super().parse_type(table_path, col_name, type_repr, *args, **kwargs)
-        if isinstance(col_type, UnknownColType):
-            m = self.TYPE_ARRAY_RE.fullmatch(type_repr)
-            if m:
-                item_type = self.parse_type(table_path, col_name, m.group(1), *args, **kwargs)
-                col_type = Array(item_type=item_type)
+    def parse_type(self, table_path: DbPath, info: RawColumnInfo) -> ColType:
+        col_type = super().parse_type(table_path, info)
+        if not isinstance(col_type, UnknownColType):
+            return col_type
 
-            # We currently ignore structs' structure, but later can parse it too. Examples:
-            # - STRUCT<INT64, STRING(10)> (unnamed)
-            # - STRUCT<foo INT64, bar STRING(10)> (named)
-            # - STRUCT<foo INT64, bar ARRAY<INT64>> (with complex fields)
-            # - STRUCT<foo INT64, bar STRUCT<a INT64, b INT64>> (nested)
-            m = self.TYPE_STRUCT_RE.fullmatch(type_repr)
-            if m:
-                col_type = Struct()
+        m = self.TYPE_ARRAY_RE.fullmatch(info.data_type)
+        if m:
+            item_info = attrs.evolve(info, data_type=m.group(1))
+            item_type = self.parse_type(table_path, item_info)
+            col_type = Array(item_type=item_type)
+            return col_type
+
+        # We currently ignore structs' structure, but later can parse it too. Examples:
+        # - STRUCT<INT64, STRING(10)> (unnamed)
+        # - STRUCT<foo INT64, bar STRING(10)> (named)
+        # - STRUCT<foo INT64, bar ARRAY<INT64>> (with complex fields)
+        # - STRUCT<foo INT64, bar STRUCT<a INT64, b INT64>> (nested)
+        m = self.TYPE_STRUCT_RE.fullmatch(info.data_type)
+        if m:
+            col_type = Struct()
+            return col_type
+
+        m = self.TYPE_NUMERIC_RE.fullmatch(info.data_type)
+        if m:
+            precision = int(m.group(3)) if m.group(3) else None
+            scale = int(m.group(4)) if m.group(4) else None
+
+            if scale is not None:
+                # NUMERIC(..., scale) — scale is set explicitly
+                effective_precision = scale
+            elif precision is not None:
+                # NUMERIC(...) — scale is missing but precision is set
+                # effectively the same as NUMERIC(..., 0)
+                effective_precision = 0
+            else:
+                # NUMERIC → default scale is 9
+                effective_precision = 9
+            col_type = Decimal(precision=effective_precision)
+            return col_type
 
         return col_type
 
@@ -139,6 +166,21 @@ class Dialect(BaseDialect):
         return f"md5({s})"
 
     def normalize_timestamp(self, value: str, coltype: TemporalType) -> str:
+        try:
+            is_date = coltype.is_date
+            is_time = coltype.is_time
+        except:
+            is_date = False
+            is_time = False
+        if isinstance(coltype, Date) or is_date:
+            return f"FORMAT_DATE('%F', {value})"
+        if isinstance(coltype, Time) or is_time:
+            microseconds = f"TIME_DIFF( {value}, cast('00:00:00' as time), microsecond)"
+            rounded = f"ROUND({microseconds}, -6 + {coltype.precision})"
+            time_value = f"TIME_ADD(cast('00:00:00' as time), interval cast({rounded} as int64) microsecond)"
+            converted = f"FORMAT_TIME('%H:%M:%E6S', {time_value})"
+            return converted
+
         if coltype.rounds:
             timestamp = f"timestamp_micros(cast(round(unix_micros(cast({value} as timestamp))/1000000, {coltype.precision})*1000000 as int))"
             return f"FORMAT_TIMESTAMP('%F %H:%M:%E6S', {timestamp})"
@@ -194,7 +236,7 @@ class BigQuery(Database):
     dataset: str
     _client: Any
 
-    def __init__(self, project, *, dataset, bigquery_credentials=None, **kw):
+    def __init__(self, project, *, dataset, bigquery_credentials=None, **kw) -> None:
         super().__init__()
         credentials = bigquery_credentials
         bigquery = import_bigquery()

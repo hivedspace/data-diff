@@ -1,7 +1,9 @@
 from typing import Any, ClassVar, Dict, Union, Type
 
 import attrs
+from packaging.version import parse as parse_version
 
+from data_diff.schema import RawColumnInfo
 from data_diff.utils import match_regexps
 from data_diff.abcs.database_types import (
     Timestamp,
@@ -27,6 +29,7 @@ from data_diff.databases.base import (
     CHECKSUM_OFFSET,
 )
 from data_diff.databases.base import MD5_HEXDIGITS, CHECKSUM_HEXDIGITS
+from data_diff.version import __version__
 
 
 @import_helper("duckdb")
@@ -42,6 +45,10 @@ class Dialect(BaseDialect):
     ROUNDS_ON_PREC_LOSS = False
     SUPPORTS_PRIMARY_KEY = True
     SUPPORTS_INDEXES = True
+
+    # https://duckdb.org/docs/sql/data_types/numeric#fixed-point-decimals
+    # The default WIDTH and SCALE is DECIMAL(18, 3), if none are specified.
+    DEFAULT_NUMERIC_PRECISION = 3
 
     TYPE_CLASSES = {
         # Timestamps
@@ -72,24 +79,16 @@ class Dialect(BaseDialect):
         # Subtracting 2 due to wierd precision issues in PostgreSQL
         return super()._convert_db_precision_to_digits(p) - 2
 
-    def parse_type(
-        self,
-        table_path: DbPath,
-        col_name: str,
-        type_repr: str,
-        datetime_precision: int = None,
-        numeric_precision: int = None,
-        numeric_scale: int = None,
-    ) -> ColType:
+    def parse_type(self, table_path: DbPath, info: RawColumnInfo) -> ColType:
         regexps = {
             r"DECIMAL\((\d+),(\d+)\)": Decimal,
         }
 
-        for m, t_cls in match_regexps(regexps, type_repr):
+        for m, t_cls in match_regexps(regexps, info.data_type):
             precision = int(m.group(2))
             return t_cls(precision=precision)
 
-        return super().parse_type(table_path, col_name, type_repr, datetime_precision, numeric_precision, numeric_scale)
+        return super().parse_type(table_path, info)
 
     def set_timezone_to_utc(self) -> str:
         return "SET GLOBAL TimeZone='UTC'"
@@ -127,7 +126,7 @@ class DuckDB(Database):
     _args: Dict[str, Any] = attrs.field(init=False)
     _conn: Any = attrs.field(init=False)
 
-    def __init__(self, **kw):
+    def __init__(self, **kw) -> None:
         super().__init__()
         self._args = kw
         self._conn = self.create_connection()
@@ -148,20 +147,36 @@ class DuckDB(Database):
     def create_connection(self):
         ddb = import_duckdb()
         try:
-            return ddb.connect(self._args["filepath"])
+            # custom_user_agent is only available in duckdb >= 0.9.2
+            if parse_version(ddb.__version__) >= parse_version("0.9.2"):
+                custom_user_agent = f"data-diff/v{__version__}"
+                config = {"custom_user_agent": custom_user_agent}
+                connection = ddb.connect(database=self._args["filepath"], config=config)
+                custom_user_agent_results = connection.sql("PRAGMA USER_AGENT;").fetchall()
+                custom_user_agent_filtered = custom_user_agent_results[0][0]
+                assert custom_user_agent in custom_user_agent_filtered
+            else:
+                connection = ddb.connect(database=self._args["filepath"])
+            return connection
         except ddb.OperationalError as e:
             raise ConnectError(*e.args) from e
+        except AssertionError:
+            raise ConnectError("Assertion failed: Custom user agent is invalid.") from None
 
     def select_table_schema(self, path: DbPath) -> str:
         database, schema, table = self._normalize_table_path(path)
 
         info_schema_path = ["information_schema", "columns"]
+
         if database:
             info_schema_path.insert(0, database)
+            dynamic_database_clause = f"'{database}'"
+        else:
+            dynamic_database_clause = "current_catalog()"
 
         return (
             f"SELECT column_name, data_type, datetime_precision, numeric_precision, numeric_scale FROM {'.'.join(info_schema_path)} "
-            f"WHERE table_name = '{table}' AND table_schema = '{schema}'"
+            f"WHERE table_name = '{table}' AND table_schema = '{schema}' and table_catalog = {dynamic_database_clause}"
         )
 
     def _normalize_table_path(self, path: DbPath) -> DbPath:

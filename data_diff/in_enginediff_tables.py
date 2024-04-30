@@ -110,8 +110,8 @@ class InEngineJoinDiffer(JoinDiffer):
             partial(self._collect_stats, 1, table1, info_tree),
             partial(self._collect_stats, 2, table2, info_tree),
             partial(self._test_null_keys, table1, table2),
-            partial(self._sample_and_count_exclusive, db, diff_rows, a_cols, b_cols),
-            partial(self._count_diff_per_column, db, diff_rows, list(a_cols), is_diff_cols),
+            partial(self._sample_and_count_exclusive, db, diff_rows, a_cols, b_cols, table1, table2),
+            partial(self._count_diff_per_column, db, diff_rows, list(a_cols), is_diff_cols, table1, table2),
             partial(
                 self._materialize_diff,
                 db,

@@ -1,6 +1,7 @@
 from typing import List, Dict, Optional, Any, Tuple, Union
 
 import attrs
+from typing_extensions import Self
 
 from data_diff.table_segment import TableSegment
 
@@ -17,13 +18,15 @@ class SegmentInfo:
     rowcounts: Dict[int, int] = attrs.field(factory=dict)
     max_rows: Optional[int] = None
 
-    def set_diff(self, diff: List[Union[Tuple[Any, ...], List[Any]]], schema: Optional[Tuple[Tuple[str, type]]] = None):
+    def set_diff(
+        self, diff: List[Union[Tuple[Any, ...], List[Any]]], schema: Optional[Tuple[Tuple[str, type]]] = None
+    ) -> None:
         self.diff_schema = schema
         self.diff = diff
         self.diff_count = len(diff)
         self.is_diff = self.diff_count > 0
 
-    def update_from_children(self, child_infos):
+    def update_from_children(self, child_infos) -> None:
         child_infos = list(child_infos)
         assert child_infos
 
@@ -41,15 +44,18 @@ class SegmentInfo:
 
 @attrs.define(frozen=True)
 class InfoTree:
+    SEGMENT_INFO_CLASS = SegmentInfo
+
     info: SegmentInfo
     children: List["InfoTree"] = attrs.field(factory=list)
 
-    def add_node(self, table1: TableSegment, table2: TableSegment, max_rows: int = None):
-        node = InfoTree(SegmentInfo([table1, table2], max_rows=max_rows))
+    def add_node(self, table1: TableSegment, table2: TableSegment, max_rows: Optional[int] = None) -> Self:
+        cls = self.__class__
+        node = cls(cls.SEGMENT_INFO_CLASS([table1, table2], max_rows=max_rows))
         self.children.append(node)
         return node
 
-    def aggregate_info(self):
+    def aggregate_info(self) -> None:
         if self.children:
             for c in self.children:
                 c.aggregate_info()
