@@ -1,5 +1,5 @@
 from enum import Enum
-from typing import List, Dict, Optional, Any
+from typing import List, Dict, Optional, Any, Union
 from pydantic import BaseModel, Field
 
 
@@ -14,6 +14,7 @@ class ManifestJsonConfig(BaseModel):
             database: Optional[str]
             schema_: Optional[str] = Field(..., alias="schema")
             tags: List[str]
+            unique_key: Optional[Union[str, List[str]]]
 
         class Column(BaseModel):
             meta: Dict[str, Any]

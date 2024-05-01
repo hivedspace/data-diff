@@ -6,6 +6,7 @@ from typing import Any, List, Dict, Tuple, Set, Optional
 
 import attrs
 import yaml
+from dbt.node_types import NodeType
 from pydantic import BaseModel
 
 from packaging.version import parse as parse_version
@@ -468,8 +469,31 @@ class DbtParser:
     def get_unique_columns(self) -> Dict[str, Set[str]]:
         manifest = self.dev_manifest_obj
         cols_by_uid = defaultdict(set)
+        from_model_config = set()
         for node in manifest.nodes.values():
             try:
+                if node.resource_type == NodeType.Model and node.config.unique_key:
+                    if isinstance(node.config.unique_key, str):
+                        unique_key = [
+                            column
+                            for column in self._parse_concat_pk_definition(node.config.unique_key)
+                            if column in node.columns
+                        ]
+                    else:
+                        # unique_key is a list of identifiers so we process each of them
+                        unique_key = []
+                        for identifier in node.config.unique_key:
+                            unique_key.extend(
+                                [
+                                    column
+                                    for column in self._parse_concat_pk_definition(identifier)
+                                    if column in node.columns
+                                ]
+                            )
+                    cols_by_uid[node.unique_id] = set(unique_key)
+                    from_model_config.add(node.unique_id)
+                    continue
+
                 if not (node.resource_type == "test" and hasattr(node, "test_metadata")):
                     continue
 
@@ -477,6 +501,11 @@ class DbtParser:
                     continue
 
                 uid = node.depends_on.nodes[0]
+
+                # we skip getting info from tests if we already have it from the
+                # model config
+                if uid in from_model_config:
+                    continue
 
                 # sources can have tests and are not in manifest.nodes
                 # skip as source unique columns are not needed
