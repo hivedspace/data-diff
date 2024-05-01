@@ -514,7 +514,7 @@ class DbtParser:
 
                 model_node = manifest.nodes[uid]
                 if node.test_metadata:
-                    if node.test_metadata.name == "unique":
+                    if node.test_metadata.name == "unique" and node.where is None and node.config.where is None:
                         column_name: str = node.test_metadata.kwargs["column_name"]
                         for col in self._parse_concat_pk_definition(column_name):
                             if model_node is None or col in model_node.columns:
