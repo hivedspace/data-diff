@@ -435,7 +435,7 @@ class DbtParser:
     def get_pk_from_model(self, node, unique_columns: dict, pk_tag: str) -> List[str]:
         try:
             # Get a set of all the column names
-            column_names = {name for name, params in node.columns.items()}
+            column_names = set(node.columns.keys())
             # Check if the tag is present on a table level
             if pk_tag in node.meta:
                 # Get all the PKs that are also present as a column
@@ -454,6 +454,29 @@ class DbtParser:
             if from_tags:
                 logger.debug(f"Found PKs via Tags [{node.name}]: " + str(from_tags))
                 return from_tags
+            if node.config.unique_key:
+                if isinstance(node.config.unique_key, str):
+                    unique_key = [
+                        column
+                        for column in
+                        self._parse_concat_pk_definition(node.config.unique_key)
+                        if column in column_names
+                    ]
+                else:
+                    # unique_key is a list of identifiers so we process each of them
+                    unique_key = []
+                    for identifier in node.config.unique_key:
+                        unique_key.extend(
+                            [
+                                column
+                                for column in
+                                self._parse_concat_pk_definition(identifier)
+                                if column in column_names
+                            ]
+                        )
+                logger.debug(f"Found PKs via unique_key [{node.name}]: " + str(unique_key))
+                return unique_key
+
             if node.unique_id in unique_columns:
                 from_uniq = unique_columns.get(node.unique_id)
                 if from_uniq is not None:
@@ -469,31 +492,8 @@ class DbtParser:
     def get_unique_columns(self) -> Dict[str, Set[str]]:
         manifest = self.dev_manifest_obj
         cols_by_uid = defaultdict(set)
-        from_model_config = set()
         for node in manifest.nodes.values():
             try:
-                if node.resource_type == NodeType.Model and node.config.unique_key:
-                    if isinstance(node.config.unique_key, str):
-                        unique_key = [
-                            column
-                            for column in self._parse_concat_pk_definition(node.config.unique_key)
-                            if column in node.columns
-                        ]
-                    else:
-                        # unique_key is a list of identifiers so we process each of them
-                        unique_key = []
-                        for identifier in node.config.unique_key:
-                            unique_key.extend(
-                                [
-                                    column
-                                    for column in self._parse_concat_pk_definition(identifier)
-                                    if column in node.columns
-                                ]
-                            )
-                    cols_by_uid[node.unique_id] = set(unique_key)
-                    from_model_config.add(node.unique_id)
-                    continue
-
                 if not (node.resource_type == "test" and hasattr(node, "test_metadata")):
                     continue
 
@@ -501,11 +501,6 @@ class DbtParser:
                     continue
 
                 uid = node.depends_on.nodes[0]
-
-                # we skip getting info from tests if we already have it from the
-                # model config
-                if uid in from_model_config:
-                    continue
 
                 # sources can have tests and are not in manifest.nodes
                 # skip as source unique columns are not needed
