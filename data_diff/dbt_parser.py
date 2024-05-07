@@ -6,6 +6,7 @@ from typing import Any, List, Dict, Tuple, Set, Optional
 
 import attrs
 import yaml
+from dbt.node_types import NodeType
 from pydantic import BaseModel
 
 from packaging.version import parse as parse_version
@@ -434,7 +435,7 @@ class DbtParser:
     def get_pk_from_model(self, node, unique_columns: dict, pk_tag: str) -> List[str]:
         try:
             # Get a set of all the column names
-            column_names = {name for name, params in node.columns.items()}
+            column_names = set(node.columns.keys())
             # Check if the tag is present on a table level
             if pk_tag in node.meta:
                 # Get all the PKs that are also present as a column
@@ -453,6 +454,29 @@ class DbtParser:
             if from_tags:
                 logger.debug(f"Found PKs via Tags [{node.name}]: " + str(from_tags))
                 return from_tags
+            if node.config.unique_key:
+                if isinstance(node.config.unique_key, str):
+                    unique_key = [
+                        column
+                        for column in
+                        self._parse_concat_pk_definition(node.config.unique_key)
+                        if column in column_names
+                    ]
+                else:
+                    # unique_key is a list of identifiers so we process each of them
+                    unique_key = []
+                    for identifier in node.config.unique_key:
+                        unique_key.extend(
+                            [
+                                column
+                                for column in
+                                self._parse_concat_pk_definition(identifier)
+                                if column in column_names
+                            ]
+                        )
+                logger.debug(f"Found PKs via unique_key [{node.name}]: " + str(unique_key))
+                return unique_key
+
             if node.unique_id in unique_columns:
                 from_uniq = unique_columns.get(node.unique_id)
                 if from_uniq is not None:
@@ -485,7 +509,7 @@ class DbtParser:
 
                 model_node = manifest.nodes[uid]
                 if node.test_metadata:
-                    if node.test_metadata.name == "unique":
+                    if node.test_metadata.name == "unique" and node.where is None and node.config.where is None:
                         column_name: str = node.test_metadata.kwargs["column_name"]
                         for col in self._parse_concat_pk_definition(column_name):
                             if model_node is None or col in model_node.columns:
