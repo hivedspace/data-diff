@@ -6,7 +6,6 @@ from typing import Any, List, Dict, Tuple, Set, Optional
 
 import attrs
 import yaml
-from dbt.node_types import NodeType
 from pydantic import BaseModel
 
 from packaging.version import parse as parse_version
@@ -65,7 +64,7 @@ MANIFEST_PATH = "target/manifest.json"
 PROJECT_FILE = "dbt_project.yml"
 PROFILES_FILE = "profiles.yml"
 LOWER_DBT_V = "1.0.0"
-UPPER_DBT_V = "1.8.0"
+UPPER_DBT_V = "1.8.4"
 
 
 # https://github.com/dbt-labs/dbt-core/blob/c952d44ec5c2506995fbad75320acbae49125d3d/core/dbt/cli/resolvers.py#L6
@@ -137,6 +136,12 @@ class DbtParser:
         self.requires_upper = False
         self.threads = None
         self.unique_columns = self.get_unique_columns()
+
+        if parse_version(self.dbt_version) >= parse_version("1.8.0"):
+            from dbt_common.clients.system import get_env
+            from dbt_common.context import set_invocation_context
+
+            set_invocation_context(get_env())
 
         if profiles_dir_override:
             self.profiles_dir = Path(profiles_dir_override)
@@ -261,7 +266,7 @@ class DbtParser:
             raise DataDiffDbtRunResultsVersionError(
                 f"Found dbt: v{dbt_version} Expected the dbt project's version to be >= {LOWER_DBT_V}"
             )
-        if dbt_version >= parse_version(UPPER_DBT_V):
+        if dbt_version > parse_version(UPPER_DBT_V):
             logger.warning(
                 f"{dbt_version} is a recent version of dbt and may not be fully tested with data-diff! \nPlease report any issues to https://github.com/datafold/data-diff/issues"
             )
