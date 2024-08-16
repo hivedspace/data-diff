@@ -89,7 +89,8 @@ from data_diff.abcs.database_types import (
     DbTime,
     DbPath,
     Boolean,
-    JSON, Geography,
+    JSON,
+    Geography,
 )
 
 logger = logging.getLogger("database")
