@@ -86,7 +86,7 @@ class Dialect(BaseDialect):
     TYPE_NUMERIC_RE = re.compile(r"^((BIG)?NUMERIC)(?:\((\d+)(?:, (\d+))?\))?$")
     # https://cloud.google.com/bigquery/docs/reference/standard-sql/data-types#parameterized_decimal_type
     # The default scale is 9, which means a number can have up to 9 digits after the decimal point.
-    DEFAULT_NUMERIC_PRECISION = 9
+    DEFAULT_NUMERIC_PRECISION = 6
 
     def random(self) -> str:
         return "RAND()"
@@ -105,6 +105,8 @@ class Dialect(BaseDialect):
 
     def parse_type(self, table_path: DbPath, info: RawColumnInfo) -> ColType:
         col_type = super().parse_type(table_path, info)
+        if isinstance(col_type, Float):
+            return Float(precision=self.DEFAULT_NUMERIC_PRECISION)
         if not isinstance(col_type, UnknownColType):
             return col_type
 
@@ -147,7 +149,7 @@ class Dialect(BaseDialect):
 
     def to_comparable(self, value: str, coltype: ColType) -> str:
         """Ensure that the expression is comparable in ``IS DISTINCT FROM``."""
-        if isinstance(coltype, (JSON, Array, Struct, Geography)):
+        if isinstance(coltype, (JSON, Array, Struct, Geography, Float)):
             return self.normalize_value_by_type(value, coltype)
         else:
             return super().to_comparable(value, coltype)
