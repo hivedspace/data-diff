@@ -5,7 +5,7 @@ from typing import Callable, Optional, Sequence
 import attrs
 
 from data_diff.abcs.database_types import ColType
-from data_diff.queries.ast_classes import Expr, ExprNode
+from data_diff.queries.ast_classes import Expr, ExprNode, LazyOps
 
 
 @attrs.define(frozen=True)
@@ -27,3 +27,8 @@ class ApplyFuncAndNormalizeAsString(ExprNode):
 @attrs.define(frozen=True)
 class Checksum(ExprNode):
     exprs: Sequence[Expr]
+
+
+@attrs.define(frozen=True, eq=False)
+class LazyNormalizeAsString(LazyOps, NormalizeAsString):
+    pass
