@@ -23,8 +23,8 @@ from data_diff.queries.api import (
     this,
     when,
 )
-from data_diff.queries.ast_classes import Concat, Count, Expr, Random, TablePath, Code, ITable
-from data_diff.queries.extras import NormalizeAsString
+from data_diff.queries.ast_classes import Concat, Count, Expr, Random, TablePath, Code, ITable, IsDistinctFrom
+from data_diff.queries.extras import NormalizeAsString, LazyNormalizeAsString
 from data_diff.info_tree import InfoTree
 from data_diff.query_utils import append_to_table, drop_table
 from data_diff.utils import safezip
@@ -72,7 +72,19 @@ def bool_to_int(x):
 
 
 def _outerjoin(db: Database, a: ITable, b: ITable, keys1: List[str], keys2: List[str], select_fields: dict) -> ITable:
-    on = [a[k1] == b[k2] for k1, k2 in safezip(keys1, keys2)]
+    on = []
+    # If any keys have different type we do the diff by normalize them to string
+    for k1, k2 in safezip(keys1, keys2):
+        if a[k1].type != b[k2].type:
+            logger.warning(
+                f"Key '{k2}' have different types {a[k1].type.__class__.__name__} "
+                f"and {b[k2].type.__class__.__name__}. "
+                f"Attempting join with casting to string."
+            )
+            op = LazyNormalizeAsString(a[k1]) == LazyNormalizeAsString(b[k2])
+            on.append(op)
+        else:
+            on.append(a[k1] == b[k2])
 
     is_exclusive_a = and_(b[k] == None for k in keys2)
     is_exclusive_b = and_(a[k] == None for k in keys1)
@@ -322,7 +334,20 @@ class JoinDiffer(TableDiffer):
         a = table1.make_select()
         b = table2.make_select()
 
-        is_diff_cols = {f"is_diff_{c1}": bool_to_int(a[c1].is_distinct_from(b[c2])) for c1, c2 in safezip(cols1, cols2)}
+        # If any pair of columns has different types, we try to do the comparison by
+        # converting to string first
+        is_diff_cols = {}
+        for c1, c2 in safezip(cols1, cols2):
+            if a[c1].type != b[c2].type:
+                logger.warning(
+                    f"Column '{c1}' have different types {a[c1].type.__class__.__name__} and {b[c2].type.__class__.__name__}. "
+                    f"Attempting comparison with casting to string."
+                )
+                is_diff_cols[f"is_diff_{c1}"] = bool_to_int(
+                    IsDistinctFrom(NormalizeAsString(a[c1]), NormalizeAsString(b[c2]))
+                )
+            else:
+                is_diff_cols[f"is_diff_{c1}"] = bool_to_int(a[c1].is_distinct_from(b[c2]))
 
         a_cols = {f"{c}_a": NormalizeAsString(a[c]) for c in cols1}
         b_cols = {f"{c}_b": NormalizeAsString(b[c]) for c in cols2}
