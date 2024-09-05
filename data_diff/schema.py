@@ -3,8 +3,8 @@ from typing import Any, Collection, Iterator, Optional
 
 import attrs
 
-from data_diff.utils import CaseAwareMapping, CaseInsensitiveDict, CaseSensitiveDict
 from data_diff.abcs.database_types import DbPath
+from data_diff.utils import CaseAwareMapping, CaseInsensitiveDict, CaseSensitiveDict
 
 logger = logging.getLogger("schema")
 

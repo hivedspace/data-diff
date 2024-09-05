@@ -1,41 +1,43 @@
 import re
-from typing import Any, ClassVar, List, Union, Type
+from typing import Any, ClassVar, List, Type, Union
 
 import attrs
 
 from data_diff.abcs.database_types import (
-    ColType,
-    Array,
     JSON,
-    Struct,
-    Timestamp,
+    Array,
+    Boolean,
+    Bytes,
+    ColType,
+    Date,
     Datetime,
-    Integer,
+    DbPath,
     Decimal,
     Float,
-    Text,
-    DbPath,
     FractionalType,
-    TemporalType,
-    Boolean,
-    UnknownColType,
     Geography,
+    Integer,
+    Struct,
+    TemporalType,
+    Text,
     Time,
-    Date,
+    Timestamp,
+    UnknownColType,
 )
 from data_diff.databases.base import (
+    CHECKSUM_HEXDIGITS,
+    CHECKSUM_OFFSET,
+    MD5_HEXDIGITS,
+    TIMESTAMP_PRECISION_POS,
     BaseDialect,
+    ConnectError,
     Database,
+    QueryResult,
+    ThreadLocalInterpreter,
+    apply_query,
     import_helper,
     parse_table_name,
-    ConnectError,
-    apply_query,
-    QueryResult,
-    CHECKSUM_OFFSET,
-    CHECKSUM_HEXDIGITS,
-    MD5_HEXDIGITS,
 )
-from data_diff.databases.base import TIMESTAMP_PRECISION_POS, ThreadLocalInterpreter
 from data_diff.schema import RawColumnInfo
 
 
@@ -79,6 +81,7 @@ class Dialect(BaseDialect):
         "BOOL": Boolean,
         "JSON": JSON,
         "GEOGRAPHY": Geography,
+        "BYTES": Bytes,
     }
     TYPE_ARRAY_RE = re.compile(r"ARRAY<(.+)>")
     TYPE_STRUCT_RE = re.compile(r"STRUCT<(.+)>")
@@ -149,7 +152,7 @@ class Dialect(BaseDialect):
 
     def to_comparable(self, value: str, coltype: ColType) -> str:
         """Ensure that the expression is comparable in ``IS DISTINCT FROM``."""
-        if isinstance(coltype, (JSON, Array, Struct, Geography, Float)):
+        if isinstance(coltype, (JSON, Array, Struct, Geography, Float, Bytes)):
             return self.normalize_value_by_type(value, coltype)
         else:
             return super().to_comparable(value, coltype)
@@ -226,6 +229,9 @@ class Dialect(BaseDialect):
 
     def normalize_geography(self, value: str, _coltype: Geography) -> str:
         return f"st_astext({value})"
+
+    def normalize_bytes(self, value: str, _coltype: Bytes) -> str:
+        return f"to_base64({value})"
 
 
 @attrs.define(frozen=False, init=False, kw_only=True)

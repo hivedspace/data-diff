@@ -1,12 +1,11 @@
 import decimal
 from abc import ABC, abstractmethod
-from typing import Collection, List, Optional, Tuple, Type, TypeVar, Union
 from datetime import datetime
+from typing import Collection, List, Optional, Tuple, Type, TypeVar, Union
 
 import attrs
 
 from data_diff.utils import ArithAlphanumeric, ArithUUID, Unknown
-
 
 DbPath = Tuple[str, ...]
 DbKey = Union[int, str, bytes, ArithUUID, ArithAlphanumeric]
@@ -310,4 +309,9 @@ class UnknownColType(ColType):
 
 @attrs.define(frozen=True)
 class Geography(ColType):
+    pass
+
+
+@attrs.define(frozen=True)
+class Bytes(ColType):
     pass

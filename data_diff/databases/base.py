@@ -1,10 +1,16 @@
 import abc
+import contextvars
+import decimal
 import functools
-import random
-from datetime import datetime
-import math
-import sys
 import logging
+import math
+import random
+import sys
+import threading
+from abc import abstractmethod
+from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime
+from functools import partial, wraps
 from typing import (
     Any,
     Callable,
@@ -12,31 +18,46 @@ from typing import (
     Dict,
     Generator,
     Iterator,
+    List,
     NewType,
-    Tuple,
     Optional,
     Sequence,
+    Tuple,
     Type,
-    List,
-    Union,
     TypeVar,
+    Union,
 )
-from functools import partial, wraps
-from concurrent.futures import ThreadPoolExecutor
-import threading
-from abc import abstractmethod
 from uuid import UUID
-import decimal
-import contextvars
 
 import attrs
 from typing_extensions import Self
 
 from data_diff.abcs.compiler import AbstractCompiler, Compilable
-from data_diff.queries.extras import ApplyFuncAndNormalizeAsString, Checksum, NormalizeAsString
-from data_diff.schema import RawColumnInfo
-from data_diff.utils import ArithString, ArithUUID, is_uuid, join_iter, safezip
-from data_diff.queries.api import Expr, table, Select, SKIP, Explain, Code, this
+from data_diff.abcs.database_types import (
+    JSON,
+    Array,
+    Boolean,
+    Bytes,
+    ColType,
+    ColType_UUID,
+    DbPath,
+    DbTime,
+    Decimal,
+    Float,
+    FractionalType,
+    Geography,
+    Integer,
+    Native_UUID,
+    String_Alphanum,
+    String_UUID,
+    String_VaryingAlphanum,
+    Struct,
+    TemporalType,
+    Text,
+    TimestampTZ,
+    UnknownColType,
+)
+from data_diff.queries.api import SKIP, Code, Explain, Expr, Select, table, this
 from data_diff.queries.ast_classes import (
     Alias,
     BinOp,
@@ -53,10 +74,10 @@ from data_diff.queries.ast_classes import (
     DropTable,
     Func,
     GroupBy,
-    ITable,
     In,
     InsertToTable,
     IsDistinctFrom,
+    ITable,
     Join,
     Param,
     Random,
@@ -69,29 +90,13 @@ from data_diff.queries.ast_classes import (
     WhenThen,
     _ResolveColumn,
 )
-from data_diff.abcs.database_types import (
-    Array,
-    ColType_UUID,
-    FractionalType,
-    Struct,
-    ColType,
-    Integer,
-    Decimal,
-    Float,
-    Native_UUID,
-    String_UUID,
-    String_Alphanum,
-    String_VaryingAlphanum,
-    TemporalType,
-    UnknownColType,
-    TimestampTZ,
-    Text,
-    DbTime,
-    DbPath,
-    Boolean,
-    JSON,
-    Geography,
+from data_diff.queries.extras import (
+    ApplyFuncAndNormalizeAsString,
+    Checksum,
+    NormalizeAsString,
 )
+from data_diff.schema import RawColumnInfo
+from data_diff.utils import ArithString, ArithUUID, is_uuid, join_iter, safezip
 
 logger = logging.getLogger("database")
 cv_params = contextvars.ContextVar("params")
@@ -275,6 +280,7 @@ class BaseDialect(abc.ABC):
     def render_compilable(self, c: Compiler, elem: Compilable) -> str:
         # All ifs are only for better code navigation, IDE usage detection, and type checking.
         # The last catch-all would render them anyway — it is a typical "visitor" pattern.
+
         if isinstance(elem, Column):
             return self.render_column(c, elem)
         elif isinstance(elem, Cte):
@@ -430,10 +436,14 @@ class BaseDialect(abc.ABC):
 
         # We coalesce because on some DBs (e.g. MySQL) concat('a', NULL) is NULL
         else:
-            items = [
-                f"coalesce({self.compile(c, Code(self.to_string(self.compile(c, expr))))}, '<null>')"
-                for expr in elem.exprs
-            ]
+            items = []
+            for expr in elem.exprs:
+                if isinstance(expr.type, Bytes):
+                    items.append(
+                        f"coalesce({self.compile(c, Code(self.normalize_bytes(self.compile(c, expr), Bytes)))}, '<null>')"
+                    )
+                else:
+                    items.append(f"coalesce({self.compile(c, Code(self.to_string(self.compile(c, expr))))}, '<null>')")
 
         assert items
         if len(items) == 1:
@@ -739,9 +749,9 @@ class BaseDialect(abc.ABC):
 
         if issubclass(cls, TemporalType):
             return cls(
-                precision=info.datetime_precision
-                if info.datetime_precision is not None
-                else DEFAULT_DATETIME_PRECISION,
+                precision=(
+                    info.datetime_precision if info.datetime_precision is not None else DEFAULT_DATETIME_PRECISION
+                ),
                 rounds=self.ROUNDS_ON_PREC_LOSS,
             )
 
@@ -764,7 +774,7 @@ class BaseDialect(abc.ABC):
                 )
             )
 
-        elif issubclass(cls, (JSON, Array, Struct, Text, Native_UUID, Geography)):
+        elif issubclass(cls, (JSON, Array, Struct, Text, Native_UUID, Geography, Bytes)):
             return cls()
 
         raise TypeError(f"Parsing {info.data_type} returned an unknown type {cls!r}.")
@@ -868,6 +878,10 @@ class BaseDialect(abc.ABC):
         """This is engine specific so needs to be implemented in the derived class."""
         raise NotImplementedError
 
+    def normalize_bytes(self, value: str, _coltype: Bytes) -> str:
+        """This is engine specific so needs to be implemented in the derived class."""
+        raise NotImplementedError
+
     def normalize_value_by_type(self, value: str, coltype: ColType) -> str:
         """Creates an SQL expression, that converts 'value' to a normalized representation.
 
@@ -900,6 +914,8 @@ class BaseDialect(abc.ABC):
             return self.normalize_struct(value, coltype)
         elif isinstance(coltype, Geography):
             return self.normalize_geography(value, coltype)
+        elif isinstance(coltype, Bytes):
+            return self.normalize_bytes(value, coltype)
         return self.to_string(value)
 
     def optimizer_hints(self, hints: str) -> str:
