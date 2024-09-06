@@ -436,14 +436,10 @@ class BaseDialect(abc.ABC):
 
         # We coalesce because on some DBs (e.g. MySQL) concat('a', NULL) is NULL
         else:
-            items = []
-            for expr in elem.exprs:
-                if isinstance(expr.type, Bytes):
-                    items.append(
-                        f"coalesce({self.compile(c, Code(self.normalize_bytes(self.compile(c, expr), Bytes)))}, '<null>')"
-                    )
-                else:
-                    items.append(f"coalesce({self.compile(c, Code(self.to_string(self.compile(c, expr))))}, '<null>')")
+            items = [
+                f"coalesce({self.compile(c, Code(self.normalize_value_by_type(self.compile(c, expr), expr.type)))}, '<null>')"
+                for expr in elem.exprs
+            ]
 
         assert items
         if len(items) == 1:
